@@ -2029,47 +2029,6 @@ namespace inst::ui {
         }
 
         nsExit();
-
-        // Verify update versions and DLC installation via NCM (the actual content
-        // storage) rather than trusting nsListApplicationContentMetaStatus, which
-        // can report content the system knows about but has not installed.
-        {
-            const NcmStorageId ncmStorages[] = {NcmStorageId_BuiltInUser, NcmStorageId_SdCard};
-            std::unordered_map<u64, u32> ncmPatchVersions;
-            std::unordered_set<u64> ncmDlcIds;
-
-            for (auto storage : ncmStorages) {
-                NcmContentMetaDatabase db;
-                if (R_FAILED(ncmOpenContentMetaDatabase(&db, storage)))
-                    continue;
-
-                for (u64 baseId : this->installedSnapshot.installedBaseIds) {
-                    const u64 patchId = baseId ^ 0x800ULL;
-                    NcmContentMetaKey key = {};
-                    if (R_SUCCEEDED(ncmContentMetaDatabaseGetLatestContentMetaKey(&db, &key, patchId))) {
-                        if (key.type == NcmContentMetaType_Patch && key.id == patchId) {
-                            auto& v = ncmPatchVersions[baseId];
-                            if (key.version > v) v = key.version;
-                        }
-                    }
-                }
-
-                for (u64 dlcId : this->installedSnapshot.installedDlcIds) {
-                    if (ncmDlcIds.count(dlcId)) continue;
-                    NcmContentMetaKey key = {};
-                    if (R_SUCCEEDED(ncmContentMetaDatabaseGetLatestContentMetaKey(&db, &key, dlcId))) {
-                        if (key.type == NcmContentMetaType_AddOnContent && key.id == dlcId)
-                            ncmDlcIds.insert(dlcId);
-                    }
-                }
-
-                ncmContentMetaDatabaseClose(&db);
-            }
-
-            this->installedSnapshot.installedUpdateVersion = std::move(ncmPatchVersions);
-            this->installedSnapshot.installedDlcIds = std::move(ncmDlcIds);
-        }
-
         this->installedSnapshot.ready = true;
         return true;
     }
@@ -2126,18 +2085,8 @@ namespace inst::ui {
                 s32 metaOut = 0;
                 if (R_SUCCEEDED(nsListApplicationContentMetaStatus(baseId, 0, list.data(), metaCount, &metaOut)) && metaOut > 0) {
                     for (s32 j = 0; j < metaOut; j++) {
-                        if (list[j].meta_type == NcmContentMetaType_Patch) {
-                            // Only show patches that NCM confirms are installed.
-                            const auto it = this->installedSnapshot.installedUpdateVersion.find(baseId);
-                            if (it == this->installedSnapshot.installedUpdateVersion.end() || it->second < list[j].version)
-                                continue;
-                        } else if (list[j].meta_type == NcmContentMetaType_AddOnContent) {
-                            // Only show DLC that NCM confirms is installed.
-                            if (!this->installedSnapshot.installedDlcIds.count(list[j].application_id))
-                                continue;
-                        } else {
+                        if (list[j].meta_type != NcmContentMetaType_Patch && list[j].meta_type != NcmContentMetaType_AddOnContent)
                             continue;
-                        }
                         remoteInstStuff::RemoteItem item;
                         item.titleId = list[j].application_id;
                         item.hasTitleId = true;
@@ -3030,95 +2979,6 @@ namespace inst::ui {
 
     }
 
-    void remoteInstPage::rebuildSectionsByTitleType()
-    {
-        auto isUpdateSectionId = [](const std::string& id) {
-            return id == "updates" || id == "update";
-        };
-        auto isDlcSectionId = [](const std::string& id) {
-            return id == "dlc" || id == "addon" || id == "add-on" || id == "add_ons";
-        };
-        auto isSpecialSectionId = [](const std::string& id) {
-            return id == "installed" || id == "saves" || id == "save";
-        };
-
-        std::vector<remoteInstStuff::RemoteSection> specialSections;
-        std::vector<remoteInstStuff::RemoteItem> baseItems, updateItems, dlcItems;
-        std::unordered_set<std::string> baseSeen, updateSeen, dlcSeen;
-
-        for (auto& section : this->remoteSections) {
-            if (isSpecialSectionId(section.id)) {
-                specialSections.push_back(std::move(section));
-                continue;
-            }
-            if (isUpdateSectionId(section.id)) {
-                // Use the already-filtered "updates" section: only updates for installed titles,
-                // with version exceeding the currently installed version.
-                for (const auto& item : section.items) {
-                    if (!IsUpdateItem(item)) continue;
-                    std::string key = BuildItemIdentityKey(item);
-                    if (key.empty()) key = "name:" + NormalizeSearchKey(item.name);
-                    if (key.empty() || !updateSeen.insert(key).second) continue;
-                    updateItems.push_back(item);
-                }
-            } else if (isDlcSectionId(section.id)) {
-                // Use the already-filtered "dlc" section: only DLC for installed titles
-                // that the user does not yet have.
-                for (const auto& item : section.items) {
-                    if (!IsDlcItem(item)) continue;
-                    std::string key = BuildItemIdentityKey(item);
-                    if (key.empty()) key = "name:" + NormalizeSearchKey(item.name);
-                    if (key.empty() || !dlcSeen.insert(key).second) continue;
-                    dlcItems.push_back(item);
-                }
-            } else {
-                // All other sections (e.g. "all", "new", server-custom sections):
-                // extract only base-game items for the Base Games page.
-                for (const auto& item : section.items) {
-                    if (!IsBaseItem(item)) continue;
-                    std::string key = BuildItemIdentityKey(item);
-                    if (key.empty()) key = "name:" + NormalizeSearchKey(item.name);
-                    if (key.empty() || !baseSeen.insert(key).second) continue;
-                    baseItems.push_back(item);
-                }
-            }
-        }
-
-        auto sortByName = [](const remoteInstStuff::RemoteItem& a, const remoteInstStuff::RemoteItem& b) {
-            return inst::util::ignoreCaseCompare(a.name, b.name);
-        };
-        std::sort(baseItems.begin(), baseItems.end(), sortByName);
-        std::sort(updateItems.begin(), updateItems.end(), sortByName);
-        std::sort(dlcItems.begin(), dlcItems.end(), sortByName);
-
-        this->remoteSections.clear();
-
-        if (!baseItems.empty()) {
-            remoteInstStuff::RemoteSection s;
-            s.id = "base";
-            s.title = "Base Games";
-            s.items = std::move(baseItems);
-            this->remoteSections.push_back(std::move(s));
-        }
-        if (!updateItems.empty()) {
-            remoteInstStuff::RemoteSection s;
-            s.id = "updates";
-            s.title = "Updates";
-            s.items = std::move(updateItems);
-            this->remoteSections.push_back(std::move(s));
-        }
-        if (!dlcItems.empty()) {
-            remoteInstStuff::RemoteSection s;
-            s.id = "dlc";
-            s.title = "DLC";
-            s.items = std::move(dlcItems);
-            this->remoteSections.push_back(std::move(s));
-        }
-
-        for (auto& section : specialSections)
-            this->remoteSections.push_back(std::move(section));
-    }
-
     void remoteInstPage::updatePreview() {
         if (this->remoteGridMode) {
             this->previewImage->SetVisible(false);
@@ -3341,12 +3201,8 @@ namespace inst::ui {
 
         if (!this->remoteSections.empty() && this->selectedSectionIndex >= 0 && this->selectedSectionIndex < static_cast<int>(this->remoteSections.size()) && this->visibleItems.empty()) {
             const auto &section = this->remoteSections[this->selectedSectionIndex];
-            if (section.id == "base" || section.id == "updates" || section.id == "dlc") {
-                std::string emptyMsg;
-                if (section.id == "updates") emptyMsg = "No updates available.";
-                else if (section.id == "dlc") emptyMsg = "No DLC available.";
-                else emptyMsg = "No base games available.";
-                this->emptySectionText->SetText(emptyMsg);
+            if (section.id == "updates" || section.id == "dlc") {
+                this->emptySectionText->SetText(section.id == "updates" ? "No updates available." : "No DLC available.");
                 CenterTextX(this->emptySectionText);
                 this->emptySectionText->SetY(350);
                 this->emptySectionText->SetVisible(true);
@@ -4158,8 +4014,6 @@ namespace inst::ui {
         this->filterOwnedSections();
         updateLoadingProgress(99, "Sorting titles...");
         this->applyAllSectionSort();
-        updateLoadingProgress(99, "Grouping by title type...");
-        this->rebuildSectionsByTitleType();
         updateLoadingProgress(99, "Preparing save sync...");
         if (this->saveSyncEnabled) {
             const bool hasSaveSection = std::any_of(this->remoteSections.begin(), this->remoteSections.end(), [](const auto& section) {
