@@ -175,6 +175,7 @@ namespace tin::network
         bool hadException = false;
         long statusCode = 0;
         bool blockedWrongStatus = false;
+        std::string errorResponse;
     };
 
     static size_t RangeStatusHeaderCallback(char* bytes, size_t size, size_t numItems, void* userData)
@@ -210,7 +211,13 @@ namespace tin::network
         if (ctx->statusCode != 0 && ctx->statusCode != 206)
         {
             ctx->blockedWrongStatus = true;
-            return 0;
+            constexpr size_t kMaxErrorResponseBytes = 4096;
+            const size_t numBytes = size * numItems;
+            const size_t remaining = kMaxErrorResponseBytes - std::min(kMaxErrorResponseBytes, ctx->errorResponse.size());
+            ctx->errorResponse.append(bytes, std::min(numBytes, remaining));
+            // Consume the error body so callers can report the server's actual
+            // diagnostic rather than only the HTTP status code.
+            return numBytes;
         }
 
         const size_t numBytes = size * numItems;
@@ -225,7 +232,7 @@ namespace tin::network
     }
 
     static int StreamHttpRangeForUrl(const std::string& url, size_t offset, size_t size,
-        const std::function<size_t (u8* bytes, size_t size)>& streamFunc)
+        const std::function<size_t (u8* bytes, size_t size)>& streamFunc, std::string* outErrorResponse)
     {
         if (size == 0)
             return 0;
@@ -296,6 +303,9 @@ namespace tin::network
             curl_slist_free_all(headerList);
         curl_easy_cleanup(curl);
 
+        if (outErrorResponse)
+            *outErrorResponse = callbackCtx.errorResponse;
+
         if (callbackCtx.hadException)
             return 1999;
 
@@ -319,7 +329,7 @@ namespace tin::network
 
     // Translates StreamDataRange/StreamHttpRangeForUrl return codes into a
     // human-readable cause so install logs stop showing an opaque "rc=1".
-    static std::string DescribeRangeError(int rc, size_t sizeRead, size_t sizeExpected)
+    static std::string DescribeRangeError(int rc, size_t sizeRead, size_t sizeExpected, const std::string& response = "")
     {
         std::stringstream ss;
         if (rc == 1999)
@@ -337,6 +347,8 @@ namespace tin::network
 
         if (sizeRead != sizeExpected)
             ss << ", got " << sizeRead << "/" << sizeExpected << " bytes";
+        if (!response.empty())
+            ss << "; server response: " << response;
         return ss.str();
     }
 
@@ -527,12 +539,13 @@ namespace tin::network
         const int rc = this->StreamDataRange(offset, size, streamFunc);
         if (rc != 0 || sizeRead != size)
         {
-            THROW_FORMAT("HTTP range read failed (%s)\n", DescribeRangeError(rc, sizeRead, size).c_str());
+            THROW_FORMAT("HTTP range read failed (%s)\n", DescribeRangeError(rc, sizeRead, size, m_lastErrorResponse).c_str());
         }
     }
 
     int HTTPDownload::StreamDataRange(size_t offset, size_t size, std::function<size_t (u8* bytes, size_t size)> streamFunc, std::function<bool()> retryConfirmFunc)
     {
+        m_lastErrorResponse.clear();
         if (size == 0)
             return 0;
 
@@ -570,7 +583,10 @@ namespace tin::network
                     if (remaining == 0)
                         return 0;
 
-                    const int rc = StreamHttpRangeForUrl(url, currentOffset, remaining, trackingFunc);
+                    std::string errorResponse;
+                    const int rc = StreamHttpRangeForUrl(url, currentOffset, remaining, trackingFunc, &errorResponse);
+                    if (!errorResponse.empty())
+                        m_lastErrorResponse = std::move(errorResponse);
                     if (rc == 0)
                         return 0;
 

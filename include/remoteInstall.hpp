@@ -11,6 +11,7 @@ namespace remoteInstStuff {
     struct RemoteItem {
         std::string name;
         std::string url;
+        std::string indexSourceUrl;
         std::string iconUrl;
         std::string appId;
         std::string saveId;
@@ -27,6 +28,7 @@ namespace remoteInstStuff {
         bool hasReleaseDate = false;
         bool hasIconUrl = false;
         bool hasAppId = false;
+        bool googleDriveWithoutApiKey = false;
     };
 
     struct RemoteSection {

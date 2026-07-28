@@ -79,6 +79,7 @@ namespace tin::network
             bool m_isJbod = false;
             size_t m_jbodSize = 0;
             std::vector<JbodSegment> m_jbodSegments;
+            std::string m_lastErrorResponse;
 
             static size_t ParseHTMLData(char* bytes, size_t size, size_t numItems, void* userData);
 
