@@ -1149,6 +1149,10 @@ namespace inst::ui {
     }
 
     remoteInstPage::~remoteInstPage() {
+        this->stopIconDownloadWorker();
+    }
+
+    void remoteInstPage::stopIconDownloadWorker() {
         this->iconDownloadStopRequested.store(true);
         this->iconDownloadCv.notify_all();
         if (this->iconDownloadThread.joinable())

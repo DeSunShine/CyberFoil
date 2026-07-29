@@ -21,6 +21,7 @@ namespace inst::ui {
         public:
             remoteInstPage();
             ~remoteInstPage();
+            void stopIconDownloadWorker();
             PU_SMART_CTOR(remoteInstPage)
             void startRemote(bool forceRefresh = false);
             void startInstall();

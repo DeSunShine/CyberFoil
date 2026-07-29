@@ -83,6 +83,12 @@ namespace inst::ui {
         return FormatOneDecimal(mib) + " MiB";
     }
 
+    void MainApplication::Close() {
+        if (this->remoteinstPage)
+            this->remoteinstPage->stopIconDownloadWorker();
+        pu::ui::Application::Close();
+    }
+
     void MainApplication::RefreshInputDevice(bool force) {
         const AppletFocusState focus = appletGetFocusState();
         const bool regainedFocus = (focus != this->lastFocusState) && (focus == AppletFocusState_InFocus);
