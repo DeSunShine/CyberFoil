@@ -59,12 +59,14 @@ namespace inst::ui {
 
         std::vector<std::string> BuildRemoteChoices(const std::vector<inst::config::RemoteProfile>& remotes)
         {
+            constexpr int kMaxRemoteChoiceLength = 48;
             std::vector<std::string> labels;
             labels.reserve(remotes.size());
             for (const auto& remote : remotes) {
-                std::string label = (remote.favourite ? "* " : "") + remote.title;
-                if (IsActiveRemote(remote))
-                    label += " (Active)";
+                const std::string prefix = remote.favourite ? "* " : "";
+                const std::string suffix = IsActiveRemote(remote) ? " (Active)" : "";
+                const int titleLength = std::max(1, kMaxRemoteChoiceLength - static_cast<int>(prefix.size() + suffix.size()));
+                std::string label = prefix + inst::util::shortenString(remote.title, titleLength, false) + suffix;
                 labels.push_back(label);
             }
             return labels;
@@ -563,8 +565,8 @@ namespace inst::ui {
                 dbVersion = "not installed";
             else
                 dbVersion = inst::util::shortenString(dbVersion, 24, false);
-            addItem("Active Remote: " + inst::util::shortenString(ActiveRemoteLabel(remotes), 42, false), false, false);
-            addItem("Memorized Remotes: " + std::to_string(remotes.size()), false, false);
+            const std::string activeLabel = inst::util::shortenString(ActiveRemoteLabel(remotes), 38, false);
+            addItem("Remotes: " + activeLabel + " (" + std::to_string(remotes.size()) + " saved)", false, false);
             addItem("Add new Remote", false, false);
             const std::string uaMode = inst::config::remoteLegacyMode ? "tinfoil" : inst::config::httpUserAgentMode;
             addItem("User-Agent profile: " + GetUserAgentProfileLabel(uaMode), false, false);
@@ -589,9 +591,96 @@ namespace inst::ui {
     }
 
     void optionsPage::refreshOptions(bool resetSelection) {
+        this->remoteListVisible = false;
         this->setSectionNavText();
         this->setSettingsMenuText();
         if (resetSelection) this->menu->SetSelectedIndex(0);
+    }
+
+    void optionsPage::openRemoteList(int selectedIndex) {
+        this->remoteListProfiles = inst::config::LoadRemotes();
+        this->remoteListVisible = true;
+        this->remoteListIndex = std::max(0, selectedIndex);
+        this->tabsFocused = false;
+        this->pageInfoText->SetText("Memorized Remotes (" + std::to_string(this->remoteListProfiles.size()) + ")");
+
+        const std::string hint = " Manage Remote     Back";
+        this->butText->SetText(hint);
+        this->bottomHintSegments = BuildBottomHintSegments(hint, 10, 20);
+
+        this->menu->ClearItems();
+        for (std::size_t i = 0; i < this->remoteListProfiles.size(); i++) {
+            const auto& remote = this->remoteListProfiles[i];
+            std::string label = std::to_string(i + 1) + ". ";
+            if (remote.favourite)
+                label += "* ";
+            label += inst::util::shortenString(remote.title, 52, false);
+            if (IsActiveRemote(remote))
+                label += "  (Active)";
+            auto item = pu::ui::elm::MenuItem::New(label);
+            item->SetColor(COLOR("#FFFFFFFF"));
+            this->menu->AddItem(item);
+        }
+
+        if (!this->remoteListProfiles.empty()) {
+            this->remoteListIndex = std::min(this->remoteListIndex, static_cast<int>(this->remoteListProfiles.size()) - 1);
+            this->menu->SetSelectedIndex(this->remoteListIndex);
+        }
+    }
+
+    void optionsPage::closeRemoteList() {
+        this->remoteListVisible = false;
+        this->pageInfoText->SetText("options.title"_lang);
+        const std::string hint = " Select/Change    / Section     Back";
+        this->butText->SetText(hint);
+        this->bottomHintSegments = BuildBottomHintSegments(hint, 10, 20);
+        this->refreshOptions();
+        this->menu->SetSelectedIndex(1);
+    }
+
+    void optionsPage::manageRemote(const inst::config::RemoteProfile& remote) {
+        const int selectedIndex = this->menu->GetSelectedIndex();
+        std::string favouriteLabel = remote.favourite ? "Unset favourite" : "Set favourite";
+        const int action = inst::ui::mainApp->CreateShowDialog(
+            remote.title,
+            "Choose an action for this Remote.",
+            {"Use this Remote", "Edit Remote", favouriteLabel, "Delete Remote", "Cancel"},
+            false
+        );
+
+        if (action == 0) {
+            inst::config::SetActiveRemote(remote, true);
+        } else if (action == 1) {
+            const bool wasActive = IsActiveRemote(remote);
+            inst::config::RemoteProfile edited = remote;
+            if (PromptForRemoteDetails(edited)) {
+                std::string error;
+                if (!inst::config::SaveRemote(edited, &error))
+                    inst::ui::mainApp->CreateShowDialog("Failed to save Remote", error.empty() ? "Unknown error." : error, {"common.ok"_lang}, true);
+                else if (wasActive)
+                    inst::config::SetActiveRemote(edited, true);
+            }
+        } else if (action == 2) {
+            inst::config::RemoteProfile updated = remote;
+            updated.favourite = !updated.favourite;
+            std::string error;
+            if (!inst::config::SaveRemote(updated, &error))
+                inst::ui::mainApp->CreateShowDialog("Failed to save Remote", error.empty() ? "Unknown error." : error, {"common.ok"_lang}, true);
+        } else if (action == 3) {
+            const int confirmDelete = inst::ui::mainApp->CreateShowDialog("Delete Remote?", "This cannot be undone.", {"Delete", "common.cancel"_lang}, false);
+            if (confirmDelete == 0) {
+                if (!inst::config::DeleteRemote(remote.fileName)) {
+                    inst::ui::mainApp->CreateShowDialog("Failed to delete Remote", "Could not remove the Remote file.", {"common.ok"_lang}, true);
+                } else if (IsActiveRemote(remote)) {
+                    inst::config::remoteUrl.clear();
+                    inst::config::remoteUser.clear();
+                    inst::config::remotePass.clear();
+                    inst::config::setConfig();
+                }
+            }
+        }
+
+        this->openRemoteList(selectedIndex);
     }
 
     void optionsPage::rememberCurrentSectionMenuIndex() {
@@ -677,6 +766,10 @@ namespace inst::ui {
         }
         inst::util::playNavigationClickIfNeeded(Down);
         if (Down & HidNpadButton_B) {
+            if (this->remoteListVisible) {
+                this->closeRemoteList();
+                return;
+            }
             mainApp->LoadLayout(mainApp->mainPage);
         }
         const bool leftPressed = (Down & (HidNpadButton_Left | HidNpadButton_StickLLeft)) != 0;
@@ -684,27 +777,27 @@ namespace inst::ui {
         const bool upPressed = (Down & (HidNpadButton_Up | HidNpadButton_StickLUp)) != 0;
         const bool downPressed = (Down & (HidNpadButton_Down | HidNpadButton_StickLDown)) != 0;
 
-        if (leftPressed && !this->tabsFocused) {
+        if (!this->remoteListVisible && leftPressed && !this->tabsFocused) {
             this->tabsFocused = true;
             this->rememberCurrentSectionMenuIndex();
             this->lockedMenuIndex = this->menu->GetSelectedIndex();
             this->setSectionNavText();
-        } else if (rightPressed && this->tabsFocused) {
+        } else if (!this->remoteListVisible && rightPressed && this->tabsFocused) {
             this->tabsFocused = false;
             this->restoreSelectedSectionMenuIndex();
             this->setSectionNavText();
         }
 
-        if (Down & HidNpadButton_L) {
+        if (!this->remoteListVisible && (Down & HidNpadButton_L)) {
             this->tabsFocused = true;
             this->setSelectedSectionAndRefresh(this->selectedSection - 1);
         }
-        if (Down & HidNpadButton_R) {
+        if (!this->remoteListVisible && (Down & HidNpadButton_R)) {
             this->tabsFocused = true;
             this->setSelectedSectionAndRefresh(this->selectedSection + 1);
         }
 
-        if (this->tabsFocused) {
+        if (!this->remoteListVisible && this->tabsFocused) {
             if (upPressed && !downPressed) {
                 this->setSelectedSectionAndRefresh(this->selectedSection - 1);
             } else if (downPressed) {
@@ -727,7 +820,7 @@ namespace inst::ui {
                     (Pos.X <= (this->menu->GetProcessedX() + this->menu->GetWidth())) &&
                     (Pos.Y >= this->menu->GetProcessedY()) &&
                     (Pos.Y <= (this->menu->GetProcessedY() + this->menu->GetHeight()));
-                const bool inSideNav = this->getSectionFromTouch(Pos.X, Pos.Y) >= 0;
+                const bool inSideNav = !this->remoteListVisible && this->getSectionFromTouch(Pos.X, Pos.Y) >= 0;
                 this->touchRegion = inSideNav ? 1 : (inMenu ? 2 : 0);
             } else {
                 int dx = Pos.X - this->touchStartX;
@@ -738,7 +831,7 @@ namespace inst::ui {
             }
         } else if (this->touchActive) {
             if (!this->touchMoved) {
-                if (this->touchRegion == 1) {
+                if (this->touchRegion == 1 && !this->remoteListVisible) {
                     this->tabsFocused = true;
                     int touchedSection = this->getSectionFromTouch(this->touchStartX, this->touchStartY);
                     if (touchedSection >= 0 && touchedSection != this->selectedSection) {
@@ -767,6 +860,12 @@ namespace inst::ui {
         }
 
         if ((((Down & HidNpadButton_A) && !this->tabsFocused) && !tabAcceptOnly) || touchSelect) {
+            if (this->remoteListVisible) {
+                const int remoteIndex = this->menu->GetSelectedIndex();
+                if (remoteIndex >= 0 && remoteIndex < static_cast<int>(this->remoteListProfiles.size()))
+                    this->manageRemote(this->remoteListProfiles[remoteIndex]);
+                return;
+            }
             std::string keyboardResult;
             int rc;
             std::vector<std::string> downloadUrl;
@@ -777,7 +876,7 @@ namespace inst::ui {
                 if ((selectedIndex < 0) || (selectedIndex >= static_cast<int>(sizeof(kGeneralMap) / sizeof(kGeneralMap[0])))) return;
                 selectedIndex = kGeneralMap[selectedIndex];
             } else if (this->selectedSection == 1) {
-                static const int kRemoteMap[] = {9, 20, 21, 25, 26, 12, 13, 24, 19, 23, 22};
+                static const int kRemoteMap[] = {20, 21, 25, 26, 12, 13, 24, 19, 23, 22};
                 if ((selectedIndex < 0) || (selectedIndex >= static_cast<int>(sizeof(kRemoteMap) / sizeof(kRemoteMap[0])))) return;
                 selectedIndex = kRemoteMap[selectedIndex];
             } else {
@@ -912,62 +1011,7 @@ namespace inst::ui {
                         inst::ui::mainApp->CreateShowDialog("Memorized Remotes", "No memorized Remotes found.", {"common.ok"_lang}, true);
                         break;
                     }
-
-                    std::vector<std::string> choices = BuildRemoteChoices(remotes);
-                    int selectedRemote = inst::ui::mainApp->CreateShowDialog("Memorized Remotes", "Select one to manage.", choices, false);
-                    if (selectedRemote < 0 || selectedRemote >= static_cast<int>(remotes.size()))
-                        break;
-
-                    auto selected = remotes[selectedRemote];
-                    std::string favouriteLabel = selected.favourite ? "Unset favourite" : "Set favourite";
-                    int action = inst::ui::mainApp->CreateShowDialog(
-                        selected.title,
-                        "Choose an action for this Remote.",
-                        {"Use this Remote", "Edit Remote", favouriteLabel, "Delete Remote", "Cancel"},
-                        false
-                    );
-
-                    if (action == 0) {
-                        if (inst::config::SetActiveRemote(selected, true))
-                            this->refreshOptions();
-                    } else if (action == 1) {
-                        const bool wasActive = IsActiveRemote(selected);
-                        inst::config::RemoteProfile edited = selected;
-                        if (!PromptForRemoteDetails(edited))
-                            break;
-
-                        std::string error;
-                        if (!inst::config::SaveRemote(edited, &error)) {
-                            inst::ui::mainApp->CreateShowDialog("Failed to save Remote", error.empty() ? "Unknown error." : error, {"common.ok"_lang}, true);
-                            break;
-                        }
-
-                        if (wasActive)
-                            inst::config::SetActiveRemote(edited, true);
-                        this->refreshOptions();
-                    } else if (action == 2) {
-                        selected.favourite = !selected.favourite;
-                        std::string error;
-                        if (!inst::config::SaveRemote(selected, &error))
-                            inst::ui::mainApp->CreateShowDialog("Failed to save Remote", error.empty() ? "Unknown error." : error, {"common.ok"_lang}, true);
-                        else
-                            this->refreshOptions();
-                    } else if (action == 3) {
-                        int confirmDelete = inst::ui::mainApp->CreateShowDialog("Delete Remote?", "This cannot be undone.", {"Delete", "common.cancel"_lang}, false);
-                        if (confirmDelete == 0) {
-                            if (!inst::config::DeleteRemote(selected.fileName)) {
-                                inst::ui::mainApp->CreateShowDialog("Failed to delete Remote", "Could not remove the Remote file.", {"common.ok"_lang}, true);
-                                break;
-                            }
-                            if (IsActiveRemote(selected)) {
-                                inst::config::remoteUrl.clear();
-                                inst::config::remoteUser.clear();
-                                inst::config::remotePass.clear();
-                                inst::config::setConfig();
-                            }
-                            this->refreshOptions();
-                        }
-                    }
+                    this->openRemoteList();
                     break;
                 }
                 case 21: {

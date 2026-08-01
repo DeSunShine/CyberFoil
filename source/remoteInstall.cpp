@@ -1893,6 +1893,7 @@ namespace remoteInstStuff {
             for (const auto& location : locations) {
                 std::string url;
                 std::string action = "add";
+                std::string title;
                 if (location.is_string()) {
                     url = location.get<std::string>();
                 } else if (location.is_object()) {
@@ -1900,6 +1901,13 @@ namespace remoteInstStuff {
                         url = location["url"].get<std::string>();
                     if (location.contains("action") && location["action"].is_string())
                         action = location["action"].get<std::string>();
+                    for (const char* key : {"title", "name", "label"}) {
+                        if (location.contains(key) && location[key].is_string()) {
+                            title = TrimAscii(location[key].get<std::string>());
+                            if (!title.empty())
+                                break;
+                        }
+                    }
                 } else {
                     error = "Custom index contains an invalid location entry.";
                     return false;
@@ -1921,6 +1929,10 @@ namespace remoteInstStuff {
                 profile.host = host;
                 profile.port = port;
                 profile.path = path;
+                const std::string derivedTitle = path.empty() ? host : (host + path);
+                // Legacy custom-index locations may omit a title, while saved
+                // profiles always require one.
+                profile.title = title.empty() ? derivedTitle : title;
                 const std::string normalizedUrl = inst::config::BuildRemoteUrl(profile);
                 auto saved = std::find_if(savedRemotes.begin(), savedRemotes.end(), [&](const auto& candidate) {
                     return inst::config::BuildRemoteUrl(candidate) == normalizedUrl;
@@ -1943,6 +1955,16 @@ namespace remoteInstStuff {
                             return false;
                         }
                         savedRemotes.push_back(profile);
+                    } else if (!title.empty() && saved->title == derivedTitle) {
+                        // Repair profiles saved by older builds that had to derive
+                        // the title because the legacy response title was ignored.
+                        profile.fileName = saved->fileName;
+                        std::string saveError;
+                        if (!inst::config::SaveRemote(profile, &saveError)) {
+                            error = saveError.empty() ? "Unable to update custom index location." : saveError;
+                            return false;
+                        }
+                        *saved = profile;
                     }
                 } else {
                     error = "Custom index location action must be add, enable, or disable.";

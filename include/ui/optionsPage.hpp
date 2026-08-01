@@ -1,6 +1,7 @@
 #pragma once
 #include <pu/Plutonium>
 #include "ui/bottomHint.hpp"
+#include "util/config.hpp"
 
 using namespace pu::ui::elm;
 namespace inst::ui {
@@ -47,13 +48,19 @@ namespace inst::ui {
             int touchRegion = 0;
             int selectedSection = 0;
             bool tabsFocused = false;
+            bool remoteListVisible = false;
             int lockedMenuIndex = 0;
+            int remoteListIndex = 0;
             std::vector<int> sectionMenuIndices;
+            std::vector<inst::config::RemoteProfile> remoteListProfiles;
             std::vector<TextBlock::Ref> sectionTexts;
             std::vector<Rectangle::Ref> sectionHighlights;
             void setSectionNavText();
             void setSettingsMenuText();
             void refreshOptions(bool resetSelection = false);
+            void openRemoteList(int selectedIndex = 0);
+            void closeRemoteList();
+            void manageRemote(const inst::config::RemoteProfile& remote);
             void rememberCurrentSectionMenuIndex();
             void restoreSelectedSectionMenuIndex();
             void setSelectedSectionAndRefresh(int newSection);
