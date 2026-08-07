@@ -161,7 +161,9 @@ namespace {
         if (!userInfo.empty())
             outUauthPart += userInfo + "@";
         outUauthPart += hostOut;
-        if (!port.empty())
+        const bool isDefaultPort = (scheme == "https" && port == "443") ||
+            (scheme == "http" && port == "80");
+        if (!port.empty() && !isDefaultPort)
             outUauthPart += ":" + port;
         outUauthPart += path;
         if (!query.empty())
