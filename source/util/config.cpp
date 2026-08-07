@@ -80,7 +80,8 @@ namespace inst::config {
 
         std::string RemoteDedupKey(const inst::config::RemoteProfile& remote)
         {
-            return inst::config::BuildRemoteUrl(remote) + "\x1f" + Trim(remote.username) + "\x1f" + Trim(remote.password);
+            return inst::config::BuildRemoteUrl(remote) + "\x1f" + Trim(remote.username) + "\x1f" + Trim(remote.password) +
+                "\x1f" + (remote.legacyMode ? "legacy" : "cyberfoil");
         }
 
         bool ParseBoolTextValue(const std::string& value, bool& out)
@@ -172,7 +173,8 @@ namespace inst::config {
                     {"username", normalized.username},
                     {"password", normalized.password},
                     {"title", normalized.title},
-                    {"favourite", normalized.favourite}
+                    {"favourite", normalized.favourite},
+                    {"legacyMode", normalized.legacyMode}
                 }}
             };
         }
@@ -316,6 +318,8 @@ namespace inst::config {
                 parsed.username = remoteNode->value("username", "");
                 parsed.password = remoteNode->value("password", "");
                 parsed.title = remoteNode->value("title", "");
+                if (remoteNode->contains("legacyMode") && (*remoteNode)["legacyMode"].is_boolean())
+                    parsed.legacyMode = (*remoteNode)["legacyMode"].get<bool>();
 
                 if (!remoteNode->contains("host") || !(*remoteNode)["host"].is_string())
                     needsRewrite = true;
@@ -730,6 +734,14 @@ namespace inst::config {
         inst::config::remoteUrl = url;
         inst::config::remoteUser = remote.username;
         inst::config::remotePass = remote.password;
+        inst::config::remoteLegacyMode = remote.legacyMode;
+        if (inst::config::remoteLegacyMode) {
+            inst::config::httpUserAgentMode = "tinfoil";
+            inst::config::httpUserAgent.clear();
+        } else if (NormalizeHttpUserAgentMode(inst::config::httpUserAgentMode) == "tinfoil") {
+            inst::config::httpUserAgentMode = "default";
+            inst::config::httpUserAgent.clear();
+        }
         if (writeConfig)
             inst::config::setConfig();
         return true;

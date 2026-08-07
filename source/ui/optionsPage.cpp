@@ -28,7 +28,8 @@ namespace inst::ui {
         {
             return inst::config::BuildRemoteUrl(remote) == inst::config::remoteUrl &&
                    remote.username == inst::config::remoteUser &&
-                   remote.password == inst::config::remotePass;
+                   remote.password == inst::config::remotePass &&
+                   remote.legacyMode == inst::config::remoteLegacyMode;
         }
 
         std::string TrimString(const std::string& value)
@@ -103,87 +104,6 @@ namespace inst::ui {
             return colonPos != std::string::npos &&
                    input.find(':') == colonPos &&
                    colonPos + 1 < input.size();
-        }
-
-        bool PromptForRemoteDetails(inst::config::RemoteProfile& remote)
-        {
-            std::string remoteTitle = TrimString(inst::util::softwareKeyboard("Enter Remote title (required)", remote.title, 80));
-            if (remoteTitle.empty()) {
-                inst::ui::mainApp->CreateShowDialog("Invalid Remote", "Title is required.", {"common.ok"_lang}, true);
-                return false;
-            }
-
-            int protocolChoice = inst::ui::mainApp->CreateShowDialog("Remote protocol", "Choose the protocol used by this Remote.", {"HTTP", "HTTPS"}, false);
-            if (protocolChoice < 0)
-                return false;
-            remote.protocol = (protocolChoice == 1) ? "https" : "http";
-
-            std::string endpointInput = TrimString(inst::util::softwareKeyboard("Enter Remote host or IP", remote.host, 200));
-            if (endpointInput.empty()) {
-                inst::ui::mainApp->CreateShowDialog("Invalid Remote", "Host is required.", {"common.ok"_lang}, true);
-                return false;
-            }
-
-            const bool hasScheme = endpointInput.rfind("http://", 0) == 0 || endpointInput.rfind("https://", 0) == 0;
-            std::string rawEndpoint = hasScheme ? endpointInput : (remote.protocol + "://" + endpointInput);
-            std::string parsedProtocol;
-            std::string parsedHost;
-            std::string parsedPath;
-            int parsedPort = inst::config::DefaultPortForProtocol(remote.protocol);
-            if (!inst::config::ParseRemoteUrl(rawEndpoint, parsedProtocol, parsedHost, parsedPort, parsedPath) || parsedHost.empty()) {
-                inst::ui::mainApp->CreateShowDialog("Invalid Remote", "Host format is invalid.", {"common.ok"_lang}, true);
-                return false;
-            }
-
-            remote.protocol = parsedProtocol;
-
-            std::string pathDefault = !parsedPath.empty() ? parsedPath : remote.path;
-            std::string remotePath = TrimString(inst::util::softwareKeyboard("Enter Remote path (optional, e.g. /remote)", pathDefault, 200));
-            remotePath = inst::config::NormalizeRemotePath(remotePath);
-
-            const int defaultPort = inst::config::DefaultPortForProtocol(remote.protocol);
-            int currentPort = remote.port;
-            if (currentPort <= 0 || currentPort > 65535)
-                currentPort = defaultPort;
-            if (RemoteInputHasExplicitPort(endpointInput))
-                currentPort = parsedPort;
-            int remotePort = currentPort;
-
-            std::string defaultPortLabel = "Use default (" + std::to_string(defaultPort) + ")";
-            std::string keepPortLabel = "Keep current (" + std::to_string(currentPort) + ")";
-            int portMode = inst::ui::mainApp->CreateShowDialog("Remote port", "Pick which port to use.", {defaultPortLabel, "Custom", keepPortLabel}, false);
-            if (portMode < 0)
-                return false;
-            if (portMode == 0) {
-                remotePort = defaultPort;
-            } else if (portMode == 1) {
-                std::string currentPortText = std::to_string(currentPort);
-                std::string portText = TrimString(inst::util::softwareKeyboard("Enter Remote port (1-65535)", currentPortText, 6));
-                if (portText.empty()) {
-                    inst::ui::mainApp->CreateShowDialog("Invalid port", "Port is required in custom mode.", {"common.ok"_lang}, true);
-                    return false;
-                }
-                try {
-                    int parsedCustomPort = std::stoi(portText);
-                    if (parsedCustomPort <= 0 || parsedCustomPort > 65535)
-                        throw std::out_of_range("port");
-                    remotePort = parsedCustomPort;
-                } catch (...) {
-                    inst::ui::mainApp->CreateShowDialog("Invalid port", "Port must be between 1 and 65535.", {"common.ok"_lang}, true);
-                    return false;
-                }
-            }
-
-            std::string remoteUser = inst::util::softwareKeyboard("options.remote.user_hint"_lang, remote.username, 100);
-            std::string remotePass = inst::util::softwareKeyboard("options.remote.pass_hint"_lang, remote.password, 100);
-
-            remote.title = remoteTitle;
-            remote.host = parsedHost;
-            remote.path = remotePath;
-            remote.port = remotePort;
-            remote.username = remoteUser;
-            remote.password = remotePass;
-            return true;
         }
 
         std::string GetUserAgentProfileLabel(const std::string& mode)
@@ -434,6 +354,35 @@ namespace inst::ui {
         this->sectionMenuIndices.assign(this->sectionTexts.size(), 0);
         this->refreshOptions(true);
         this->Add(this->menu);
+
+        this->remoteFormShade = Rectangle::New(0, 74, 1280, 586, COLOR("#00000088"));
+        this->remoteFormBorder = Rectangle::New(238, 80, 804, 574, inst::config::oledMode ? COLOR("#FFFFFF66") : COLOR("#170909FF"));
+        this->remoteFormPanel = Rectangle::New(241, 83, 798, 568, inst::config::oledMode ? COLOR("#000000FA") : COLOR("#170909FA"));
+        this->remoteFormTitle = TextBlock::New(270, 104, "Remote", 32);
+        this->remoteFormHint = TextBlock::New(270, 614, " Edit/Select     Cancel", 20);
+        this->remoteFormMenu = Menu::New(260, 140, 760, COLOR("#00000000"), 46, 10, 24);
+        this->remoteFormMenu->SetOnFocusColor(inst::config::oledMode ? COLOR("#FFFFFF33") : COLOR("#00000070"));
+        this->remoteProtocolDropdownPanel = Rectangle::New(720, 146, 286, 108, inst::config::oledMode ? COLOR("#000000FF") : COLOR("#170909FF"));
+        this->remoteProtocolDropdownMenu = Menu::New(728, 154, 270, COLOR("#00000000"), 46, 2, 25);
+        this->remoteProtocolDropdownMenu->SetOnFocusColor(inst::config::oledMode ? COLOR("#FFFFFF33") : COLOR("#00000070"));
+        this->remoteFormTitle->SetColor(COLOR("#FFFFFFFF"));
+        this->remoteFormHint->SetColor(COLOR("#FFFFFFFF"));
+        this->remoteFormShade->SetVisible(false);
+        this->remoteFormBorder->SetVisible(false);
+        this->remoteFormPanel->SetVisible(false);
+        this->remoteFormTitle->SetVisible(false);
+        this->remoteFormHint->SetVisible(false);
+        this->remoteFormMenu->SetVisible(false);
+        this->remoteProtocolDropdownPanel->SetVisible(false);
+        this->remoteProtocolDropdownMenu->SetVisible(false);
+        this->Add(this->remoteFormShade);
+        this->Add(this->remoteFormBorder);
+        this->Add(this->remoteFormPanel);
+        this->Add(this->remoteFormTitle);
+        this->Add(this->remoteFormHint);
+        this->Add(this->remoteFormMenu);
+        this->Add(this->remoteProtocolDropdownPanel);
+        this->Add(this->remoteProtocolDropdownMenu);
     }
 
     void optionsPage::askToUpdate(std::vector<std::string> updateInfo) {
@@ -638,6 +587,186 @@ namespace inst::ui {
         this->menu->SetSelectedIndex(1);
     }
 
+    void optionsPage::openRemoteForm(const inst::config::RemoteProfile& remote, bool wasActive, bool returnToList, int returnIndex) {
+        this->remoteFormProfile = remote;
+        if (this->remoteFormProfile.protocol != "https")
+            this->remoteFormProfile.protocol = "http";
+        if (this->remoteFormProfile.host.empty())
+            this->remoteFormProfile.port = inst::config::DefaultPortForProtocol(this->remoteFormProfile.protocol);
+        else if (this->remoteFormProfile.port <= 0 || this->remoteFormProfile.port > 65535)
+            this->remoteFormProfile.port = inst::config::DefaultPortForProtocol(this->remoteFormProfile.protocol);
+        this->remoteFormProfile.path = inst::config::NormalizeRemotePath(this->remoteFormProfile.path);
+        this->remoteFormWasActive = wasActive;
+        this->remoteFormReturnToList = returnToList;
+        this->remoteFormReturnIndex = returnIndex;
+        this->remoteFormVisible = true;
+        this->remoteProtocolDropdownVisible = false;
+        this->remoteModeDropdownVisible = false;
+        this->menu->SetVisible(false);
+        this->pageInfoText->SetVisible(false);
+        this->butText->SetVisible(false);
+        this->remoteFormShade->SetVisible(true);
+        this->remoteFormBorder->SetVisible(true);
+        this->remoteFormPanel->SetVisible(true);
+        this->remoteFormTitle->SetVisible(true);
+        this->remoteFormHint->SetVisible(true);
+        this->remoteFormMenu->SetVisible(true);
+        this->refreshRemoteForm();
+    }
+
+    void optionsPage::closeRemoteForm() {
+        this->remoteFormVisible = false;
+        this->remoteProtocolDropdownVisible = false;
+        this->remoteModeDropdownVisible = false;
+        this->remoteFormShade->SetVisible(false);
+        this->remoteFormBorder->SetVisible(false);
+        this->remoteFormPanel->SetVisible(false);
+        this->remoteFormTitle->SetVisible(false);
+        this->remoteFormHint->SetVisible(false);
+        this->remoteFormMenu->SetVisible(false);
+        this->remoteProtocolDropdownPanel->SetVisible(false);
+        this->remoteProtocolDropdownMenu->SetVisible(false);
+        this->pageInfoText->SetVisible(true);
+        this->butText->SetVisible(true);
+        this->menu->SetVisible(true);
+
+        if (this->remoteFormReturnToList)
+            this->openRemoteList(this->remoteFormReturnIndex);
+        else {
+            this->refreshOptions();
+            this->menu->SetSelectedIndex(1);
+        }
+    }
+
+    void optionsPage::refreshRemoteForm() {
+        const auto fieldValue = [](const std::string& value, const std::string& emptyValue) {
+            return value.empty() ? emptyValue : inst::util::shortenString(value, 34, false);
+        };
+        const std::string protocol = this->remoteFormProfile.protocol == "https" ? "HTTPS" : "HTTP";
+        const std::string mode = this->remoteFormProfile.legacyMode ? "Legacy Mode (Tinfoil)" : "CyberFoil Mode";
+        const std::string path = this->remoteFormProfile.path.empty() ? "/" : this->remoteFormProfile.path;
+        const std::string password = this->remoteFormProfile.password.empty() ? "Not set" : "Set";
+        const std::string favourite = this->remoteFormProfile.favourite ? "Yes" : "No";
+        const std::vector<std::string> rows = {
+            "Protocol                                      " + protocol,
+            "Mode                                          " + mode,
+            "Host                                          " + fieldValue(this->remoteFormProfile.host, "Required"),
+            "Port                                          " + std::to_string(this->remoteFormProfile.port),
+            "Path                                          " + fieldValue(path, "/"),
+            "Username                                      " + fieldValue(this->remoteFormProfile.username, "Not set"),
+            "Password                                      " + password,
+            "Title                                         " + fieldValue(this->remoteFormProfile.title, "Required"),
+            "Favourite                                     " + favourite,
+            "Save Remote"
+        };
+        const int selected = std::max(0, this->remoteFormMenu->GetSelectedIndex());
+        this->remoteFormMenu->ClearItems();
+        for (const auto& row : rows) {
+            auto item = MenuItem::New(row);
+            item->SetColor(COLOR("#FFFFFFFF"));
+            this->remoteFormMenu->AddItem(item);
+        }
+        this->remoteFormMenu->SetSelectedIndex(std::min(selected, static_cast<int>(rows.size()) - 1));
+    }
+
+    void optionsPage::editRemoteFormField() {
+        const int field = this->remoteFormMenu->GetSelectedIndex();
+        if (field == 0) {
+            this->remoteProtocolDropdownVisible = true;
+            this->remoteProtocolDropdownMenu->ClearItems();
+            auto http = MenuItem::New("HTTP");
+            auto https = MenuItem::New("HTTPS");
+            http->SetColor(COLOR("#FFFFFFFF"));
+            https->SetColor(COLOR("#FFFFFFFF"));
+            this->remoteProtocolDropdownMenu->AddItem(http);
+            this->remoteProtocolDropdownMenu->AddItem(https);
+            this->remoteProtocolDropdownMenu->SetSelectedIndex(this->remoteFormProfile.protocol == "https" ? 1 : 0);
+            this->remoteProtocolDropdownPanel->SetY(146);
+            this->remoteProtocolDropdownMenu->SetY(154);
+            this->remoteProtocolDropdownPanel->SetVisible(true);
+            this->remoteProtocolDropdownMenu->SetVisible(true);
+            return;
+        }
+        if (field == 1) {
+            this->remoteModeDropdownVisible = true;
+            this->remoteProtocolDropdownMenu->ClearItems();
+            auto cyberFoil = MenuItem::New("CyberFoil Mode");
+            auto legacy = MenuItem::New("Legacy Mode (Tinfoil)");
+            cyberFoil->SetColor(COLOR("#FFFFFFFF"));
+            legacy->SetColor(COLOR("#FFFFFFFF"));
+            this->remoteProtocolDropdownMenu->AddItem(cyberFoil);
+            this->remoteProtocolDropdownMenu->AddItem(legacy);
+            this->remoteProtocolDropdownMenu->SetSelectedIndex(this->remoteFormProfile.legacyMode ? 1 : 0);
+            this->remoteProtocolDropdownPanel->SetY(192);
+            this->remoteProtocolDropdownMenu->SetY(200);
+            this->remoteProtocolDropdownPanel->SetVisible(true);
+            this->remoteProtocolDropdownMenu->SetVisible(true);
+            return;
+        }
+        if (field == 2) {
+            const std::string endpoint = TrimString(inst::util::softwareKeyboard("Enter Remote host or IP", this->remoteFormProfile.host, 200));
+            if (!endpoint.empty()) {
+                const bool hasScheme = endpoint.rfind("http://", 0) == 0 || endpoint.rfind("https://", 0) == 0;
+                const std::string rawEndpoint = hasScheme ? endpoint : (this->remoteFormProfile.protocol + "://" + endpoint);
+                std::string protocol, host, path;
+                int port = inst::config::DefaultPortForProtocol(this->remoteFormProfile.protocol);
+                if (inst::config::ParseRemoteUrl(rawEndpoint, protocol, host, port, path) && !host.empty()) {
+                    this->remoteFormProfile.protocol = protocol;
+                    this->remoteFormProfile.host = host;
+                    if (RemoteInputHasExplicitPort(endpoint))
+                        this->remoteFormProfile.port = port;
+                    if (!path.empty())
+                        this->remoteFormProfile.path = path;
+                } else {
+                    mainApp->CreateShowDialog("Invalid Remote", "Host format is invalid.", {"common.ok"_lang}, true);
+                }
+            }
+        } else if (field == 3) {
+            const std::string value = TrimString(inst::util::numericKeyboard("Enter Remote port (1-65535)", std::to_string(this->remoteFormProfile.port), 5));
+            if (value.empty()) {
+                this->refreshRemoteForm();
+                return;
+            }
+            try {
+                const int port = std::stoi(value);
+                if (port <= 0 || port > 65535)
+                    throw std::out_of_range("port");
+                this->remoteFormProfile.port = port;
+            } catch (...) {
+                mainApp->CreateShowDialog("Invalid port", "Port must be between 1 and 65535.", {"common.ok"_lang}, true);
+            }
+        } else if (field == 4) {
+            this->remoteFormProfile.path = inst::config::NormalizeRemotePath(inst::util::softwareKeyboard("Enter Remote path (optional, e.g. /remote)", this->remoteFormProfile.path, 200));
+        } else if (field == 5) {
+            this->remoteFormProfile.username = inst::util::softwareKeyboard("options.remote.user_hint"_lang, this->remoteFormProfile.username, 100);
+        } else if (field == 6) {
+            this->remoteFormProfile.password = inst::util::softwareKeyboard("options.remote.pass_hint"_lang, this->remoteFormProfile.password, 100);
+        } else if (field == 7) {
+            this->remoteFormProfile.title = TrimString(inst::util::softwareKeyboard("Enter Remote title (required)", this->remoteFormProfile.title, 80));
+        } else if (field == 8) {
+            this->remoteFormProfile.favourite = !this->remoteFormProfile.favourite;
+        } else if (field == 9) {
+            this->saveRemoteForm();
+            return;
+        }
+        this->refreshRemoteForm();
+    }
+
+    void optionsPage::saveRemoteForm() {
+        if (this->remoteFormProfile.host.empty() || this->remoteFormProfile.title.empty()) {
+            mainApp->CreateShowDialog("Invalid Remote", this->remoteFormProfile.host.empty() ? "Host is required." : "Title is required.", {"common.ok"_lang}, true);
+            return;
+        }
+        std::string error;
+        if (!inst::config::SaveRemote(this->remoteFormProfile, &error)) {
+            mainApp->CreateShowDialog("Failed to save Remote", error.empty() ? "Unknown error." : error, {"common.ok"_lang}, true);
+            return;
+        }
+        if (this->remoteFormWasActive)
+            inst::config::SetActiveRemote(this->remoteFormProfile, true);
+        this->closeRemoteForm();
+    }
+
     void optionsPage::manageRemote(const inst::config::RemoteProfile& remote) {
         const int selectedIndex = this->menu->GetSelectedIndex();
         std::string favouriteLabel = remote.favourite ? "Unset favourite" : "Set favourite";
@@ -651,15 +780,8 @@ namespace inst::ui {
         if (action == 0) {
             inst::config::SetActiveRemote(remote, true);
         } else if (action == 1) {
-            const bool wasActive = IsActiveRemote(remote);
-            inst::config::RemoteProfile edited = remote;
-            if (PromptForRemoteDetails(edited)) {
-                std::string error;
-                if (!inst::config::SaveRemote(edited, &error))
-                    inst::ui::mainApp->CreateShowDialog("Failed to save Remote", error.empty() ? "Unknown error." : error, {"common.ok"_lang}, true);
-                else if (wasActive)
-                    inst::config::SetActiveRemote(edited, true);
-            }
+            this->openRemoteForm(remote, IsActiveRemote(remote), true, selectedIndex);
+            return;
         } else if (action == 2) {
             inst::config::RemoteProfile updated = remote;
             updated.favourite = !updated.favourite;
@@ -765,6 +887,40 @@ namespace inst::ui {
             Down |= FindBottomHintButton(this->bottomHintSegments, bottomTapX);
         }
         inst::util::playNavigationClickIfNeeded(Down);
+        if (this->remoteFormVisible) {
+            if (this->remoteProtocolDropdownVisible || this->remoteModeDropdownVisible) {
+                if (Down & HidNpadButton_B) {
+                    this->remoteProtocolDropdownVisible = false;
+                    this->remoteModeDropdownVisible = false;
+                    this->remoteProtocolDropdownPanel->SetVisible(false);
+                    this->remoteProtocolDropdownMenu->SetVisible(false);
+                    return;
+                }
+                if (Down & HidNpadButton_A) {
+                    if (this->remoteModeDropdownVisible) {
+                        this->remoteFormProfile.legacyMode = this->remoteProtocolDropdownMenu->GetSelectedIndex() == 1;
+                    } else {
+                        const int previousDefaultPort = inst::config::DefaultPortForProtocol(this->remoteFormProfile.protocol);
+                        this->remoteFormProfile.protocol = this->remoteProtocolDropdownMenu->GetSelectedIndex() == 1 ? "https" : "http";
+                        if (this->remoteFormProfile.port == previousDefaultPort)
+                            this->remoteFormProfile.port = inst::config::DefaultPortForProtocol(this->remoteFormProfile.protocol);
+                    }
+                    this->remoteProtocolDropdownVisible = false;
+                    this->remoteModeDropdownVisible = false;
+                    this->remoteProtocolDropdownPanel->SetVisible(false);
+                    this->remoteProtocolDropdownMenu->SetVisible(false);
+                    this->refreshRemoteForm();
+                }
+                return;
+            }
+            if (Down & HidNpadButton_B) {
+                this->closeRemoteForm();
+                return;
+            }
+            if (Down & HidNpadButton_A)
+                this->editRemoteFormField();
+            return;
+        }
         if (Down & HidNpadButton_B) {
             if (this->remoteListVisible) {
                 this->closeRemoteList();
@@ -1016,23 +1172,7 @@ namespace inst::ui {
                 }
                 case 21: {
                     inst::config::RemoteProfile newRemote;
-                    if (!PromptForRemoteDetails(newRemote))
-                        break;
-
-                    int favouriteChoice = inst::ui::mainApp->CreateShowDialog("Favourite Remote", "Keep this Remote at the top of the list?", {"common.no"_lang, "common.yes"_lang}, false);
-                    if (favouriteChoice < 0)
-                        break;
-
-                    newRemote.favourite = (favouriteChoice == 1);
-
-                    std::string error;
-                    if (!inst::config::SaveRemote(newRemote, &error)) {
-                        inst::ui::mainApp->CreateShowDialog("Failed to save Remote", error.empty() ? "Unknown error." : error, {"common.ok"_lang}, true);
-                        break;
-                    }
-
-                    inst::config::SetActiveRemote(newRemote, true);
-                    this->refreshOptions();
+                    this->openRemoteForm(newRemote, true, false);
                     break;
                 }
                 case 25: {
@@ -1252,5 +1392,3 @@ namespace inst::ui {
         }
     }
 }
-
-

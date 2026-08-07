@@ -61,6 +61,7 @@ namespace inst::config {
         std::string password;
         std::string title;
         bool favourite = false;
+        bool legacyMode = false;
         std::int64_t updatedAt = 0;
     };
 
