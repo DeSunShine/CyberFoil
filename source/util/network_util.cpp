@@ -47,11 +47,38 @@ namespace tin::network
 {
     static std::string g_basic_auth_user;
     static std::string g_basic_auth_pass;
+    static std::string g_basic_auth_origin;
     static bool g_basic_auth_set = false;
 
-    static void ApplyBasicAuth(CURL* curl, std::string& authValue)
+    static std::string GetUrlOrigin(const std::string& url)
     {
-        if (!g_basic_auth_set)
+        const std::size_t schemeEnd = url.find("://");
+        if (schemeEnd == std::string::npos || schemeEnd == 0)
+            return {};
+        const std::size_t authorityStart = schemeEnd + 3;
+        const std::size_t authorityEnd = url.find_first_of("/?#", authorityStart);
+        std::string authority = url.substr(authorityStart, authorityEnd - authorityStart);
+        const std::size_t userInfoEnd = authority.rfind('@');
+        if (userInfoEnd != std::string::npos)
+            authority.erase(0, userInfoEnd + 1);
+        if (authority.empty())
+            return {};
+
+        std::string origin = url.substr(0, schemeEnd) + "://" + authority;
+        std::transform(origin.begin(), origin.end(), origin.begin(), [](unsigned char c) {
+            return static_cast<char>(std::tolower(c));
+        });
+        return origin;
+    }
+
+    static bool CanUseBasicAuthForUrl(const std::string& url)
+    {
+        return g_basic_auth_set && !g_basic_auth_origin.empty() && GetUrlOrigin(url) == g_basic_auth_origin;
+    }
+
+    static void ApplyBasicAuth(CURL* curl, std::string& authValue, const std::string& url)
+    {
+        if (!CanUseBasicAuthForUrl(url))
             return;
 
         authValue = g_basic_auth_user + ":" + g_basic_auth_pass;
@@ -89,6 +116,20 @@ namespace tin::network
         if (pos == std::string::npos)
             return in;
         return in.substr(0, pos);
+    }
+
+    static bool HasRequestHeader(const std::vector<std::string>& headers, const char* name)
+    {
+        for (const auto& header : headers) {
+            const auto colon = header.find(':');
+            if (colon == std::string::npos)
+                continue;
+            if (header.size() >= colon && std::strlen(name) == colon &&
+                std::equal(header.begin(), header.begin() + colon, name,
+                    [](unsigned char a, unsigned char b) { return std::tolower(a) == std::tolower(b); }))
+                return true;
+        }
+        return false;
     }
 
     static bool StartsWithNoCase(const std::string& text, const char* prefix)
@@ -231,8 +272,9 @@ namespace tin::network
         }
     }
 
-    static int StreamHttpRangeForUrl(const std::string& url, size_t offset, size_t size,
-        const std::function<size_t (u8* bytes, size_t size)>& streamFunc, std::string* outErrorResponse)
+    static int StreamHttpRangeForUrl(const std::string& url, const std::vector<std::string>& requestHeaders,
+        size_t offset, size_t size, const std::function<size_t (u8* bytes, size_t size)>& streamFunc,
+        std::string* outErrorResponse)
     {
         if (size == 0)
             return 0;
@@ -251,9 +293,13 @@ namespace tin::network
 
         curl_easy_setopt(curl, CURLOPT_URL, requestUrl.c_str());
         curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, false);
-        const std::string& userAgent = inst::curl::getUserAgent();
-        curl_easy_setopt(curl, CURLOPT_USERAGENT, userAgent.c_str());
-        curl_easy_setopt(curl, CURLOPT_ACCEPT_ENCODING, "identity");
+        const bool legacyRequest = inst::config::remoteLegacyMode;
+        if (!legacyRequest && !HasRequestHeader(requestHeaders, "User-Agent")) {
+            const std::string& userAgent = inst::curl::getUserAgent();
+            curl_easy_setopt(curl, CURLOPT_USERAGENT, userAgent.c_str());
+        }
+        if (!legacyRequest)
+            curl_easy_setopt(curl, CURLOPT_ACCEPT_ENCODING, "identity");
         curl_easy_setopt(curl, CURLOPT_RANGE, range.c_str());
         curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
         curl_easy_setopt(curl, CURLOPT_MAXREDIRS, 8L);
@@ -270,29 +316,34 @@ namespace tin::network
         curl_easy_setopt(curl, CURLOPT_TCP_KEEPIDLE, 30L);
         curl_easy_setopt(curl, CURLOPT_TCP_KEEPINTVL, 15L);
         std::string authValue;
-        ApplyBasicAuth(curl, authValue);
+        const bool useBasicAuth = CanUseBasicAuthForUrl(requestUrl);
+        ApplyBasicAuth(curl, authValue, requestUrl);
 
         struct curl_slist* headerList = nullptr;
-        std::string versionValue;
-        std::string revisionValue;
-        BuildVersionAndRevision(versionValue, revisionValue);
-        const std::string themeHeader = "Theme: 0000000000000000000000000000000000000000000000000000000000000000";
-        const std::string uidHeader = "UID: " + inst::util::ComputeUidFromMmcCid();
-        const std::string versionHeader = "Version: " + versionValue;
-        const std::string revisionHeader = "Revision: " + revisionValue;
-        const std::string languageHeader = "Language: " + Language::GetRemoteHeaderLanguage();
         const std::string hauthHeader = "HAUTH: " + inst::util::ComputeHauthFromUrl(requestUrl);
         const std::string uauthHeader = "UAUTH: " + inst::util::ComputeUauthFromUrl(
             requestUrl,
-            g_basic_auth_set ? g_basic_auth_user : "",
-            g_basic_auth_set ? g_basic_auth_pass : "");
-        headerList = curl_slist_append(headerList, themeHeader.c_str());
-        headerList = curl_slist_append(headerList, languageHeader.c_str());
+            useBasicAuth ? g_basic_auth_user : "",
+            useBasicAuth ? g_basic_auth_pass : "");
         headerList = curl_slist_append(headerList, hauthHeader.c_str());
-        headerList = curl_slist_append(headerList, uidHeader.c_str());
-        headerList = curl_slist_append(headerList, versionHeader.c_str());
-        headerList = curl_slist_append(headerList, revisionHeader.c_str());
         headerList = curl_slist_append(headerList, uauthHeader.c_str());
+        if (!legacyRequest) {
+            std::string versionValue;
+            std::string revisionValue;
+            BuildVersionAndRevision(versionValue, revisionValue);
+            const std::string themeHeader = "Theme: 0000000000000000000000000000000000000000000000000000000000000000";
+            const std::string uidHeader = "UID: " + inst::util::ComputeUidFromMmcCid();
+            const std::string versionHeader = "Version: " + versionValue;
+            const std::string revisionHeader = "Revision: " + revisionValue;
+            const std::string languageHeader = "Language: " + Language::GetRemoteHeaderLanguage();
+            headerList = curl_slist_append(headerList, themeHeader.c_str());
+            headerList = curl_slist_append(headerList, languageHeader.c_str());
+            headerList = curl_slist_append(headerList, uidHeader.c_str());
+            headerList = curl_slist_append(headerList, versionHeader.c_str());
+            headerList = curl_slist_append(headerList, revisionHeader.c_str());
+        }
+        for (const auto& header : requestHeaders)
+            headerList = curl_slist_append(headerList, header.c_str());
         if (headerList)
             curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headerList);
 
@@ -405,7 +456,7 @@ namespace tin::network
         curl_easy_setopt(curl, CURLOPT_HEADERDATA, this);
         curl_easy_setopt(curl, CURLOPT_HEADERFUNCTION, &tin::network::HTTPHeader::ParseHTMLHeader);
         std::string authValue;
-        ApplyBasicAuth(curl, authValue);
+        ApplyBasicAuth(curl, authValue, m_url);
 
         rc = curl_easy_perform(curl);
         if (rc != CURLE_OK)
@@ -433,8 +484,8 @@ namespace tin::network
         return m_values[key];
     }
 
-    HTTPDownload::HTTPDownload(std::string url) :
-        m_url(url), m_header(url)
+    HTTPDownload::HTTPDownload(std::string url, std::vector<std::string> requestHeaders) :
+        m_url(url), m_requestHeaders(std::move(requestHeaders)), m_header(url)
     {
         m_url = TrimCopy(m_url);
         const bool isJbod = StartsWithNoCase(m_url, "jbod:");
@@ -584,7 +635,7 @@ namespace tin::network
                         return 0;
 
                     std::string errorResponse;
-                    const int rc = StreamHttpRangeForUrl(url, currentOffset, remaining, trackingFunc, &errorResponse);
+                    const int rc = StreamHttpRangeForUrl(url, m_requestHeaders, currentOffset, remaining, trackingFunc, &errorResponse);
                     if (!errorResponse.empty())
                         m_lastErrorResponse = std::move(errorResponse);
                     if (rc == 0)
@@ -671,17 +722,19 @@ namespace tin::network
         return 0;
     }
 
-    void SetBasicAuth(const std::string& user, const std::string& pass)
+    void SetBasicAuth(const std::string& user, const std::string& pass, const std::string& trustedOrigin)
     {
         g_basic_auth_user = user;
         g_basic_auth_pass = pass;
-        g_basic_auth_set = true;
+        g_basic_auth_origin = GetUrlOrigin(trustedOrigin);
+        g_basic_auth_set = !g_basic_auth_origin.empty();
     }
 
     void ClearBasicAuth()
     {
         g_basic_auth_user.clear();
         g_basic_auth_pass.clear();
+        g_basic_auth_origin.clear();
         g_basic_auth_set = false;
     }
 

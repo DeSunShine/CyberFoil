@@ -98,6 +98,31 @@ namespace {
         return url;
     }
 
+    // Basic-auth credentials belong only to the remote the user configured.  A
+    // legacy index may link arbitrary directory manifests, so do not forward
+    // them to a different origin.
+    std::string GetUrlOrigin(const std::string& url)
+    {
+        const std::size_t schemeEnd = url.find("://");
+        if (schemeEnd == std::string::npos || schemeEnd == 0)
+            return {};
+
+        const std::size_t authorityStart = schemeEnd + 3;
+        const std::size_t authorityEnd = url.find_first_of("/?#", authorityStart);
+        std::string authority = url.substr(authorityStart, authorityEnd - authorityStart);
+        const std::size_t userInfoEnd = authority.rfind('@');
+        if (userInfoEnd != std::string::npos)
+            authority.erase(0, userInfoEnd + 1);
+        if (authority.empty())
+            return {};
+
+        std::string origin = url.substr(0, schemeEnd) + "://" + authority;
+        std::transform(origin.begin(), origin.end(), origin.begin(), [](unsigned char c) {
+            return static_cast<char>(std::tolower(c));
+        });
+        return origin;
+    }
+
     int HexNibble(char c)
     {
         if (c >= '0' && c <= '9')
@@ -518,10 +543,10 @@ namespace {
         return ext == ".xci" || ext == ".xcz";
     }
 
-    bool IsXciMagic(const std::string& url)
+    bool IsXciMagic(const std::string& url, const std::vector<std::string>& requestHeaders)
     {
         try {
-            tin::network::HTTPDownload download(url);
+            tin::network::HTTPDownload download(url, requestHeaders);
             u32 magic = 0;
             download.BufferDataRange(&magic, 0xF000, sizeof(magic), nullptr);
             if (magic == 0x30534648)
@@ -1585,7 +1610,7 @@ namespace remoteInstStuff {
         }
 
         bool AppendRemoteItemFromEntry(const nlohmann::json& entry, const std::string& baseUrl,
-            const std::string& googleApiKey, std::vector<RemoteItem>& items,
+            const std::string& googleApiKey, const std::vector<std::string>& requestHeaders, std::vector<RemoteItem>& items,
             std::unordered_set<std::string>& seenItemUrls, std::string& error)
         {
             std::string rawUrl;
@@ -1664,6 +1689,7 @@ namespace remoteInstStuff {
             item.name = name;
             item.url = fullUrl;
             item.indexSourceUrl = baseUrl;
+            item.requestHeaders = requestHeaders;
             item.size = size;
             item.googleDriveWithoutApiKey = (urlPath.rfind("gdrive:", 0) == 0 && googleApiKey.empty()) ||
                 IsGoogleDriveApiUrlWithoutKey(fullUrl);
@@ -1738,13 +1764,13 @@ namespace remoteInstStuff {
         }
 
         bool AppendLegacyFilesFromJson(const nlohmann::json& files, const std::string& baseUrl,
-            const std::string& googleApiKey, std::vector<RemoteItem>& items,
+            const std::string& googleApiKey, const std::vector<std::string>& requestHeaders, std::vector<RemoteItem>& items,
             std::unordered_set<std::string>& seenItemUrls, std::string& error)
         {
             if (files.is_array()) {
                 bool any = false;
                 for (const auto& entry : files) {
-                    any = AppendRemoteItemFromEntry(entry, baseUrl, googleApiKey, items, seenItemUrls, error) || any;
+                    any = AppendRemoteItemFromEntry(entry, baseUrl, googleApiKey, requestHeaders, items, seenItemUrls, error) || any;
                     if (!error.empty())
                         return false;
                 }
@@ -1762,7 +1788,7 @@ namespace remoteInstStuff {
                     nlohmann::json normalized = value;
                     if ((!normalized.contains("name") || !normalized["name"].is_string()) && !key.empty())
                         normalized["name"] = key;
-                    any = AppendRemoteItemFromEntry(normalized, baseUrl, googleApiKey, items, seenItemUrls, error) || any;
+                    any = AppendRemoteItemFromEntry(normalized, baseUrl, googleApiKey, requestHeaders, items, seenItemUrls, error) || any;
                     if (!error.empty())
                         return false;
                 } else if (value.is_string()) {
@@ -1770,7 +1796,7 @@ namespace remoteInstStuff {
                         {"name", key},
                         {"url", value.get<std::string>()}
                     };
-                    any = AppendRemoteItemFromEntry(normalized, baseUrl, googleApiKey, items, seenItemUrls, error) || any;
+                    any = AppendRemoteItemFromEntry(normalized, baseUrl, googleApiKey, requestHeaders, items, seenItemUrls, error) || any;
                     if (!error.empty())
                         return false;
                 } else if (value.is_array()) {
@@ -1781,7 +1807,7 @@ namespace remoteInstStuff {
                             {"name", key},
                             {"url", sub.get<std::string>()}
                         };
-                        any = AppendRemoteItemFromEntry(normalized, baseUrl, googleApiKey, items, seenItemUrls, error) || any;
+                        any = AppendRemoteItemFromEntry(normalized, baseUrl, googleApiKey, requestHeaders, items, seenItemUrls, error) || any;
                         if (!error.empty())
                             return false;
                     }
@@ -2033,7 +2059,8 @@ namespace remoteInstStuff {
         bool CollectRemoteItemsFromJson(const nlohmann::json& remote, const std::string& baseUrl,
             const std::string& user, const std::string& pass, std::vector<RemoteItem>& items,
             std::unordered_set<std::string>& seenItemUrls, std::unordered_set<std::string>& seenManifestUrls,
-            std::string& error, const RemoteFetchProgressCallback& progressCb, const std::string& inheritedGoogleApiKey = "")
+            std::string& error, const RemoteFetchProgressCallback& progressCb, const std::string& inheritedGoogleApiKey = "",
+            const std::string& credentialOrigin = "")
         {
             if (!remote.is_object()) {
                 error = "Invalid Remote response.";
@@ -2050,6 +2077,20 @@ namespace remoteInstStuff {
             if (remote.contains("googleApiKey") && remote["googleApiKey"].is_string())
                 googleApiKey = TrimAscii(remote["googleApiKey"].get<std::string>());
 
+            std::vector<std::string> requestHeaders;
+            if (remote.contains("headers")) {
+                for (const auto& headerValue : remote["headers"]) {
+                    const std::string header = TrimAscii(headerValue.get<std::string>());
+                    const std::size_t colon = header.find(':');
+                    if (colon == std::string::npos || colon == 0 ||
+                        header.find_first_of("\r\n") != std::string::npos) {
+                        error = "Custom index contains an invalid request header.";
+                        return false;
+                    }
+                    requestHeaders.push_back(header);
+                }
+            }
+
             if (remote.contains("locations") && !ApplyCustomIndexLocations(remote["locations"], error))
                 return false;
 
@@ -2064,9 +2105,10 @@ namespace remoteInstStuff {
                 }
                 if (!parsedSections.empty()) {
                     for (const auto& section : parsedSections) {
-                        for (const auto& sectionItem : section.items) {
+                        for (auto sectionItem : section.items) {
                             if (!seenItemUrls.insert(sectionItem.url).second)
                                 continue;
+                            sectionItem.requestHeaders = requestHeaders;
                             items.push_back(sectionItem);
                         }
                     }
@@ -2075,13 +2117,13 @@ namespace remoteInstStuff {
             }
 
             if (remote.contains("files")) {
-                if (AppendLegacyFilesFromJson(remote["files"], baseUrl, googleApiKey, items, seenItemUrls, error))
+                if (AppendLegacyFilesFromJson(remote["files"], baseUrl, googleApiKey, requestHeaders, items, seenItemUrls, error))
                     handled = true;
                 else if (!error.empty())
                     return false;
             }
             if (remote.contains("paths")) {
-                if (AppendLegacyFilesFromJson(remote["paths"], baseUrl, googleApiKey, items, seenItemUrls, error))
+                if (AppendLegacyFilesFromJson(remote["paths"], baseUrl, googleApiKey, requestHeaders, items, seenItemUrls, error))
                     handled = true;
                 else if (!error.empty())
                     return false;
@@ -2104,7 +2146,10 @@ namespace remoteInstStuff {
                     if (!seenManifestUrls.insert(directoryUrl).second)
                         continue;
 
-                    FetchResult directoryFetch = FetchRemoteResponse(directoryUrl, user, pass, progressCb);
+                    const bool sameCredentialOrigin = !credentialOrigin.empty() &&
+                        GetUrlOrigin(directoryUrl) == credentialOrigin;
+                    FetchResult directoryFetch = FetchRemoteResponse(
+                        directoryUrl, sameCredentialOrigin ? user : "", sameCredentialOrigin ? pass : "", progressCb);
                     if (!ValidateRemoteResponse(directoryFetch, error))
                         return false;
 
@@ -2116,7 +2161,8 @@ namespace remoteInstStuff {
                         return false;
                     }
 
-                    if (!CollectRemoteItemsFromJson(directoryJson, directoryUrl, user, pass, items, seenItemUrls, seenManifestUrls, error, progressCb, googleApiKey))
+                    if (!CollectRemoteItemsFromJson(directoryJson, directoryUrl, user, pass, items, seenItemUrls, seenManifestUrls,
+                        error, progressCb, googleApiKey, credentialOrigin))
                         return false;
                 }
             }
@@ -2150,7 +2196,8 @@ namespace remoteInstStuff {
             std::unordered_set<std::string> seenItemUrls;
             std::unordered_set<std::string> seenManifestUrls;
             seenManifestUrls.insert(baseUrl);
-            if (!CollectRemoteItemsFromJson(remote, baseUrl, user, pass, items, seenItemUrls, seenManifestUrls, error, progressCb))
+            if (!CollectRemoteItemsFromJson(remote, baseUrl, user, pass, items, seenItemUrls, seenManifestUrls,
+                error, progressCb, "", GetUrlOrigin(baseUrl)))
                 return items;
         }
         catch (...) {
@@ -2460,8 +2507,8 @@ namespace remoteInstStuff {
             return false;
         }
 
-        static bool InstallXciHttpStream(const std::string& url, NcmStorageId dest_storage) {
-            tin::network::HTTPDownload download(url);
+        static bool InstallXciHttpStream(const std::string& url, const std::vector<std::string>& requestHeaders, NcmStorageId dest_storage) {
+            tin::network::HTTPDownload download(url, requestHeaders);
             HttpStreamSource source(download);
 
             std::vector<StreamCollectionEntry> collections;
@@ -2714,7 +2761,8 @@ namespace remoteInstStuff {
         }
 
         if (!inst::config::remoteUser.empty() || !inst::config::remotePass.empty())
-            tin::network::SetBasicAuth(inst::config::remoteUser, inst::config::remotePass);
+            tin::network::SetBasicAuth(inst::config::remoteUser, inst::config::remotePass,
+                NormalizeRemoteUrl(inst::config::remoteUrl));
         else
             tin::network::ClearBasicAuth();
 
@@ -2733,17 +2781,18 @@ namespace remoteInstStuff {
                 UpdateInstallIcon(items[i]);
                 inst::ui::instPage::setTopInstInfoText("inst.info_page.top_info0"_lang + currentName + sourceLabel);
                 std::unique_ptr<tin::install::Install> installTask;
-                bool isXci = IsXciExtension(items[i].name) || IsXciExtension(items[i].url) || IsXciMagic(items[i].url);
+                bool isXci = IsXciExtension(items[i].name) || IsXciExtension(items[i].url) ||
+                    IsXciMagic(items[i].url, items[i].requestHeaders);
                 if (isXci) {
                     inst::ui::instPage::setInstInfoText("Transfer received. Install started...");
                     inst::diag::NoteInstallStarted(currentName);
-                    if (!InstallXciHttpStream(items[i].url, destStorageId)) {
+                    if (!InstallXciHttpStream(items[i].url, items[i].requestHeaders, destStorageId)) {
                         THROW_FORMAT("Failed to install XCI from remote.");
                     }
                     inst::diag::RecordSuccess(currentName);
                     continue;
                 } else {
-                    auto httpNSP = std::make_shared<tin::install::nsp::HTTPNSP>(items[i].url);
+                    auto httpNSP = std::make_shared<tin::install::nsp::HTTPNSP>(items[i].url, items[i].requestHeaders);
                     installTask = std::make_unique<tin::install::nsp::NSPInstall>(destStorageId, inst::config::ignoreReqVers, httpNSP);
                 }
 

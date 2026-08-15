@@ -24,6 +24,7 @@ SOFTWARE.
 
 #include "install/nsp.hpp"
 #include <memory>
+#include <vector>
 
 namespace tin::install::nsp
 {
@@ -33,7 +34,7 @@ namespace tin::install::nsp
             tin::network::HTTPDownload m_download;
             std::string m_displayName;
 
-            HTTPNSP(std::string url);
+            HTTPNSP(std::string url, std::vector<std::string> requestHeaders = {});
 
             virtual void StreamToPlaceholder(std::shared_ptr<nx::ncm::ContentStorage>& contentStorage, NcmContentId placeholderId) override;
             virtual void BufferData(void* buf, off_t offset, size_t size) override;

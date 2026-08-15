@@ -12,6 +12,8 @@ namespace remoteInstStuff {
         std::string name;
         std::string url;
         std::string indexSourceUrl;
+        // Headers declared by a legacy Tinfoil index for the file request.
+        std::vector<std::string> requestHeaders;
         std::string iconUrl;
         std::string appId;
         std::string saveId;
