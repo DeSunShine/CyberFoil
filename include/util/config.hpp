@@ -45,6 +45,7 @@ namespace inst::config {
     extern bool usbAck;
     extern bool remoteHideInstalled;
     extern bool remoteHideInstalledSection;
+    extern bool remoteHideIncompatibleCheats;
     extern bool remoteAllBaseOnly;
     extern bool remoteLegacyMode;
     extern bool remoteStartGridMode;
@@ -78,4 +79,3 @@ namespace inst::config {
     void setConfig();
     void parseConfig();
 }
-

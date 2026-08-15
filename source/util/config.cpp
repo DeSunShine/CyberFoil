@@ -31,6 +31,7 @@ namespace inst::config {
     bool validateNCAs;
     bool remoteHideInstalled;
     bool remoteHideInstalledSection;
+    bool remoteHideIncompatibleCheats;
     bool remoteAllBaseOnly;
     bool remoteLegacyMode;
     bool remoteStartGridMode;
@@ -770,6 +771,7 @@ namespace inst::config {
             {"httpUserAgent", httpUserAgent},
             {"remoteHideInstalled", remoteHideInstalled},
             {"remoteHideInstalledSection", remoteHideInstalledSection},
+            {"remoteHideIncompatibleCheats", remoteHideIncompatibleCheats},
             {"remoteAllBaseOnly", remoteAllBaseOnly},
             {"remoteLegacyMode", remoteLegacyMode},
             {"remoteStartGridMode", remoteStartGridMode},
@@ -804,6 +806,7 @@ namespace inst::config {
         httpUserAgent.clear();
         remoteHideInstalled = true;
         remoteHideInstalledSection = true;
+        remoteHideIncompatibleCheats = false;
         remoteAllBaseOnly = true;
         remoteLegacyMode = false;
         remoteStartGridMode = false;
@@ -840,6 +843,7 @@ namespace inst::config {
             if (j.contains("httpUserAgent")) httpUserAgent = j["httpUserAgent"].get<std::string>();
             if (j.contains("remoteHideInstalled")) remoteHideInstalled = j["remoteHideInstalled"].get<bool>();
             if (j.contains("remoteHideInstalledSection")) remoteHideInstalledSection = j["remoteHideInstalledSection"].get<bool>();
+            if (j.contains("remoteHideIncompatibleCheats")) remoteHideIncompatibleCheats = j["remoteHideIncompatibleCheats"].get<bool>();
             if (j.contains("remoteAllBaseOnly")) remoteAllBaseOnly = j["remoteAllBaseOnly"].get<bool>();
             if (j.contains("remoteLegacyMode")) remoteLegacyMode = j["remoteLegacyMode"].get<bool>();
             if (j.contains("remoteStartGridMode")) remoteStartGridMode = j["remoteStartGridMode"].get<bool>();
@@ -868,6 +872,7 @@ namespace inst::config {
                 "httpUserAgent",
                 "remoteHideInstalled",
                 "remoteHideInstalledSection",
+                "remoteHideIncompatibleCheats",
                 "remoteAllBaseOnly",
                 "remoteLegacyMode",
                 "remoteStartGridMode",
@@ -917,4 +922,3 @@ namespace inst::config {
             setConfig();
     }
 }
-

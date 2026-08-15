@@ -14,6 +14,7 @@
 #include <zstd.h>
 #include <mbedtls/aes.h>
 #include "remoteInstall.hpp"
+#include "cheat_manager.hpp"
 #include "install/http_nsp.hpp"
 #include "install/http_xci.hpp"
 #include "install/install.hpp"
@@ -1292,6 +1293,17 @@ namespace {
                             item.saveNote = entry["save_note"].get<std::string>();
                         else if (entry.contains("saveNote") && entry["saveNote"].is_string())
                             item.saveNote = entry["saveNote"].get<std::string>();
+                        // AeroFoil cheats are catalog entries, not installable content.
+                        const bool cheatSection = (parsed.id == "cheats");
+                        const bool cheatType = entry.contains("app_type") && entry["app_type"].is_string() && entry["app_type"].get<std::string>() == "CHEAT";
+                        if (cheatSection || cheatType) {
+                            item.cheatTitleId = entry.value("title_id", "");
+                            item.cheatBuildId = entry.value("build_id", "");
+                            item.cheatNote = entry.value("note", "");
+                            item.isCheat = inst::cheats::IsValidTitleId(item.cheatTitleId) && inst::cheats::IsValidBuildId(item.cheatBuildId);
+                            if (entry.contains("title_name") && entry["title_name"].is_string())
+                                item.name = entry["title_name"].get<std::string>() + " — " + item.cheatBuildId;
+                        }
                         if (entry.contains("created_at") && entry["created_at"].is_string())
                             item.saveCreatedAt = entry["created_at"].get<std::string>();
                         else if (entry.contains("createdAt") && entry["createdAt"].is_string())
@@ -1318,6 +1330,14 @@ namespace {
                     }
                 }
 
+                if (parsed.id == "cheats") {
+                    // Keep all builds for a title adjacent in the dedicated Cheats section.
+                    std::stable_sort(parsed.items.begin(), parsed.items.end(), [](const auto& a, const auto& b) {
+                        if (a.name != b.name)
+                            return inst::util::ignoreCaseCompare(a.name, b.name);
+                        return a.cheatBuildId < b.cheatBuildId;
+                    });
+                }
                 if (!parsed.items.empty())
                     sections.push_back(parsed);
             }
@@ -2213,6 +2233,71 @@ namespace remoteInstStuff {
         if (tryLegacyFallback())
             return sections;
         return sections;
+    }
+
+    bool DownloadCheatText(const RemoteItem& item, const std::string& user, const std::string& pass, std::string& text, std::string& error)
+    {
+        text.clear(); error.clear();
+        if (!item.isCheat || item.url.empty() || !inst::cheats::IsValidTitleId(item.cheatTitleId) || !inst::cheats::IsValidBuildId(item.cheatBuildId)) {
+            error = "Invalid cheat entry.";
+            return false;
+        }
+        FetchResult fetch = FetchRemoteResponse(item.url, user, pass);
+        if (!ValidateRemoteResponse(fetch, error))
+            return false;
+        if (fetch.responseCode == 404 || fetch.responseCode == 405) {
+            error = "This AeroFoil server does not support the cheat download API.";
+            return false;
+        }
+        if (fetch.responseCode < 200 || fetch.responseCode >= 300) {
+            error = "Cheat download failed (HTTP " + std::to_string(fetch.responseCode) + ").";
+            return false;
+        }
+        text = std::move(fetch.body);
+        return true;
+    }
+
+    bool UploadCheatText(const std::string& remoteUrl, const std::string& user, const std::string& pass, const std::string& titleId, const std::string& buildId, const std::string& note, const std::string& text, std::string& error)
+    {
+        error.clear();
+        if (user.empty() && pass.empty()) { error = "Cheat upload requires authenticated AeroFoil admin credentials."; return false; }
+        if (!inst::cheats::IsValidTitleId(titleId) || !inst::cheats::IsValidBuildId(buildId)) { error = "Invalid title ID or build ID."; return false; }
+        const std::string baseUrl = NormalizeRemoteUrl(remoteUrl);
+        if (baseUrl.empty()) { error = "Remote URL is empty."; return false; }
+        const std::string url = BuildFullUrl(baseUrl, "/api/cheats");
+        CURL* curl = curl_easy_init();
+        if (!curl) { error = "Failed to initialize curl."; return false; }
+        std::string response;
+        curl_mime* mime = curl_mime_init(curl);
+        auto addField = [&](const char* name, const std::string& value) { curl_mimepart* part = curl_mime_addpart(mime); curl_mime_name(part, name); curl_mime_data(part, value.data(), value.size()); };
+        addField("title_id", titleId); addField("build_id", buildId); addField("content", text);
+        if (!note.empty()) addField("note", note);
+        curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
+        curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
+        curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 0L);
+        const std::string userAgent = inst::config::remoteLegacyMode ? std::string() : inst::curl::getDefaultUserAgent();
+        curl_easy_setopt(curl, CURLOPT_USERAGENT, userAgent.c_str());
+        curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, WriteToString);
+        curl_easy_setopt(curl, CURLOPT_WRITEDATA, &response);
+        curl_easy_setopt(curl, CURLOPT_TIMEOUT_MS, kRemoteRequestTimeoutMs);
+        curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT_MS, kRemoteConnectTimeoutMs);
+        curl_easy_setopt(curl, CURLOPT_MIMEPOST, mime);
+        struct curl_slist* headerList = nullptr;
+        for (const auto& header : BuildLegacyHeaders(url, user, pass)) headerList = curl_slist_append(headerList, header.c_str());
+        if (headerList) curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headerList);
+        const std::string authValue = user + ":" + pass;
+        curl_easy_setopt(curl, CURLOPT_HTTPAUTH, CURLAUTH_BASIC);
+        curl_easy_setopt(curl, CURLOPT_USERPWD, authValue.c_str());
+        const CURLcode rc = curl_easy_perform(curl);
+        long responseCode = 0; curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &responseCode);
+        if (headerList) curl_slist_free_all(headerList);
+        curl_mime_free(mime); curl_easy_cleanup(curl);
+        if (rc != CURLE_OK) { error = curl_easy_strerror(rc); return false; }
+        if (responseCode == 401 || responseCode == 403) { error = "AeroFoil rejected the upload: this Remote account is not an admin."; return false; }
+        if (responseCode == 404 || responseCode == 405) { error = "This AeroFoil server does not support cheat uploads."; return false; }
+        if (responseCode < 200 || responseCode >= 300) { error = "Cheat upload failed (HTTP " + std::to_string(responseCode) + ")."; return false; }
+        try { const auto body = nlohmann::json::parse(response); if (body.contains("success") && body["success"].is_boolean() && !body["success"].get<bool>()) { error = body.value("error", "AeroFoil rejected the upload."); return false; } } catch (...) { /* Some AeroFoil versions return an empty success body. */ }
+        return true;
     }
 
     namespace {

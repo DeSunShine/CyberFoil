@@ -525,6 +525,7 @@ namespace inst::ui {
             addItem("Tinfoil Mode (legacy Remote compatibility)", true, inst::config::remoteLegacyMode);
             addItem("options.menu_items.remote_hide_installed"_lang, true, inst::config::remoteHideInstalled);
             addItem("options.menu_items.remote_hide_installed_section"_lang, true, inst::config::remoteHideInstalledSection);
+            addItem("Hide cheats not matching local build / installed title", true, inst::config::remoteHideIncompatibleCheats);
             addItem("options.menu_items.remote_all_base_only"_lang, true, inst::config::remoteAllBaseOnly);
             addItem("options.menu_items.remote_start_grid_mode"_lang, true, inst::config::remoteStartGridMode);
             addItem("Offline DB auto-check on startup", true, inst::config::offlineDbAutoCheckOnStartup);
@@ -1032,7 +1033,7 @@ namespace inst::ui {
                 if ((selectedIndex < 0) || (selectedIndex >= static_cast<int>(sizeof(kGeneralMap) / sizeof(kGeneralMap[0])))) return;
                 selectedIndex = kGeneralMap[selectedIndex];
             } else if (this->selectedSection == 1) {
-                static const int kRemoteMap[] = {20, 21, 25, 26, 12, 13, 24, 19, 23, 22};
+                static const int kRemoteMap[] = {20, 21, 25, 26, 12, 13, 27, 24, 19, 23, 22};
                 if ((selectedIndex < 0) || (selectedIndex >= static_cast<int>(sizeof(kRemoteMap) / sizeof(kRemoteMap[0])))) return;
                 selectedIndex = kRemoteMap[selectedIndex];
             } else {
@@ -1248,6 +1249,11 @@ namespace inst::ui {
                     break;
                 case 13:
                     inst::config::remoteHideInstalledSection = !inst::config::remoteHideInstalledSection;
+                    inst::config::setConfig();
+                    this->refreshOptions();
+                    break;
+                case 27:
+                    inst::config::remoteHideIncompatibleCheats = !inst::config::remoteHideIncompatibleCheats;
                     inst::config::setConfig();
                     this->refreshOptions();
                     break;

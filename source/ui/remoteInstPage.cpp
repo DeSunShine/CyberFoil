@@ -16,6 +16,7 @@
 #include "ui/overflowText.hpp"
 #include "util/config.hpp"
 #include "util/curl.hpp"
+#include "cheat_manager.hpp"
 #include "util/lang.hpp"
 #include "util/offline_title_db.hpp"
 #include "util/save_sync.hpp"
@@ -1312,6 +1313,30 @@ namespace inst::ui {
         return id == "saves" || id == "save";
     }
 
+    bool remoteInstPage::isCheatsSection() const {
+        if (this->remoteSections.empty() || this->selectedSectionIndex < 0 || this->selectedSectionIndex >= (int)this->remoteSections.size())
+            return false;
+        return this->remoteSections[this->selectedSectionIndex].id == "cheats";
+    }
+
+    bool remoteInstPage::isCheatCompatible(const remoteInstStuff::RemoteItem& item) const {
+        if (!item.isCheat)
+            return false;
+        std::uint64_t titleId = 0;
+        if (!TryParseHexU64(item.cheatTitleId, titleId))
+            return false;
+        // Horizon's title metadata does not expose program build IDs. A local
+        // Atmosphere cheat is therefore the only reliable build-ID signal.
+        const auto titleIt = this->installedSnapshot.baseInstalled.find(titleId);
+        if (titleIt == this->installedSnapshot.baseInstalled.end() || !titleIt->second)
+            return false;
+        std::string localError;
+        const auto localCheats = inst::cheats::List(item.cheatTitleId, localError);
+        if (localCheats.empty())
+            return true; // No local build signal: keep the server candidate visible.
+        return inst::cheats::IsInstalled(item.cheatTitleId, item.cheatBuildId);
+    }
+
     const std::vector<remoteInstStuff::RemoteItem>& remoteInstPage::getCurrentItems() const {
         static const std::vector<remoteInstStuff::RemoteItem> empty;
         if (this->remoteSections.empty())
@@ -1515,8 +1540,9 @@ namespace inst::ui {
         this->loadingProgressText->SetVisible(visible);
         this->loadingBarBack->SetVisible(visible);
         this->loadingBarFill->SetVisible(visible);
-        this->loadingStagesBack->SetVisible(visible);
-        this->loadingStagesText->SetVisible(visible);
+        const bool showRemoteStages = visible && !this->cheatInstallProgressVisible;
+        this->loadingStagesBack->SetVisible(showRemoteStages);
+        this->loadingStagesText->SetVisible(showRemoteStages);
         if (!visible) {
             this->loadingStageIndex = -1;
             this->loadingSpinnerFrame = 0;
@@ -1689,6 +1715,10 @@ namespace inst::ui {
     std::string remoteInstPage::buildListMenuLabel(const remoteInstStuff::RemoteItem& item)
     {
         const std::string normalizedName = OverflowText::NormalizeSingleLineText(item.name);
+        if (item.isCheat) {
+            std::string suffix = inst::cheats::IsInstalled(item.cheatTitleId, item.cheatBuildId) ? " [Installed]" : " [Remote]";
+            return inst::util::shortenString(normalizedName, ComputeListNameLimit(suffix), true) + suffix;
+        }
         std::string sizeText = FormatSizeText(item.size);
         std::string suffix = sizeText.empty() ? "" : (" [" + sizeText + "]");
         const int nameLimit = ComputeListNameLimit(suffix);
@@ -1971,6 +2001,8 @@ namespace inst::ui {
         }
         else if (this->isSaveSyncSection())
             this->setButtonsText(" Manage Save     Refresh    / Section     Search    \xEE\x83\x85 Sort     Cancel");
+        else if (this->isCheatsSection())
+            this->setButtonsText(" Manage Cheat     Install All     Refresh    / Section     Search    \xEE\x83\x85 Sort     Cancel");
         else if (this->isInstalledSection())
             this->setButtonsText(" Details     Refresh    / Section     Search    \xEE\x83\x85 Sort     View     Cancel");
         else {
@@ -2904,7 +2936,7 @@ namespace inst::ui {
             for (auto& section : this->remoteSections) {
                 if (section.items.empty())
                     continue;
-                if (section.id == "all" || section.id == "installed")
+                if (section.id == "all" || section.id == "installed" || section.id == "cheats")
                     continue;
                 if (section.id == "updates" || section.id == "dlc")
                     continue;
@@ -2930,7 +2962,7 @@ namespace inst::ui {
             for (auto& section : this->remoteSections) {
                 if (section.items.empty())
                     continue;
-                if (section.id == "installed" || section.id == "updates" || section.id == "update" ||
+                if (section.id == "installed" || section.id == "updates" || section.id == "update" || section.id == "cheats" ||
                     (this->saveSyncEnabled && (section.id == "saves" || section.id == "save")))
                     continue;
 
@@ -3190,6 +3222,12 @@ namespace inst::ui {
             this->visibleItems = items;
         }
 
+        if (this->isCheatsSection() && inst::config::remoteHideIncompatibleCheats) {
+            this->visibleItems.erase(std::remove_if(this->visibleItems.begin(), this->visibleItems.end(), [&](const auto& item) {
+                return !this->isCheatCompatible(item);
+            }), this->visibleItems.end());
+        }
+
         if (this->isAllSection() && inst::config::remoteAllBaseOnly) {
             std::vector<remoteInstStuff::RemoteItem> baseOnlyItems;
             baseOnlyItems.reserve(this->visibleItems.size());
@@ -3203,6 +3241,7 @@ namespace inst::ui {
         if (!this->isAllSection())
             this->applyBrowseSort();
 
+
         if (!this->remoteSections.empty() && this->selectedSectionIndex >= 0 && this->selectedSectionIndex < static_cast<int>(this->remoteSections.size()) && this->visibleItems.empty()) {
             const auto &section = this->remoteSections[this->selectedSectionIndex];
             if (section.id == "updates" || section.id == "dlc") {
@@ -3212,6 +3251,11 @@ namespace inst::ui {
                 this->emptySectionText->SetVisible(true);
             } else if (section.id == "saves" || section.id == "save") {
                 this->emptySectionText->SetText("No saves available.");
+                CenterTextX(this->emptySectionText);
+                this->emptySectionText->SetY(350);
+                this->emptySectionText->SetVisible(true);
+            } else if (section.id == "cheats") {
+                this->emptySectionText->SetText("No cheats available from this AeroFoil server.");
                 CenterTextX(this->emptySectionText);
                 this->emptySectionText->SetY(350);
                 this->emptySectionText->SetVisible(true);
@@ -3255,8 +3299,9 @@ namespace inst::ui {
 
         const bool installedSection = this->isInstalledSection();
         const bool saveSyncSection = this->isSaveSyncSection();
+        const bool cheatsSection = this->isCheatsSection();
         std::unordered_set<std::string> selectedUrls;
-        if (!installedSection && !saveSyncSection && !this->selectedItems.empty()) {
+        if (!installedSection && !saveSyncSection && !cheatsSection && !this->selectedItems.empty()) {
             selectedUrls.reserve(this->selectedItems.size());
             for (const auto& selected : this->selectedItems) {
                 if (!selected.url.empty())
@@ -3277,7 +3322,7 @@ namespace inst::ui {
             }
             auto entry = pu::ui::elm::MenuItem::New(itm);
             entry->SetColor(COLOR("#FFFFFFFF"));
-            if (!installedSection && !saveSyncSection) {
+            if (!installedSection && !saveSyncSection && !cheatsSection) {
                 entry->SetIcon("romfs:/images/icons/checkbox-blank-outline.png");
                 if (!item.url.empty() && selectedUrls.find(item.url) != selectedUrls.end())
                     entry->SetIcon("romfs:/images/icons/check-box-outline.png");
@@ -3334,7 +3379,7 @@ namespace inst::ui {
     void remoteInstPage::refreshListSelectionIcons() {
         if (this->menu->GetItems().empty())
             return;
-        if (this->isInstalledSection() || this->isSaveSyncSection())
+        if (this->isInstalledSection() || this->isSaveSyncSection() || this->isCheatsSection())
             return;
 
         std::unordered_set<std::string> selectedUrls;
@@ -3906,7 +3951,14 @@ namespace inst::ui {
         );
         if (!error.empty()) {
             RemoteDlcTrace("FetchRemoteSections error: %s", error.c_str());
+            std::string audioPath = "romfs:/audio/bark.wav";
+            if (!inst::config::soundEnabled)
+                audioPath.clear();
+            else if (std::filesystem::exists(inst::config::appDir + "/bark.wav"))
+                audioPath = inst::config::appDir + "/bark.wav";
+            std::thread errorSound(inst::util::playAudio, audioPath);
             mainApp->CreateShowDialog("inst.remote.failed"_lang, error, {"common.ok"_lang}, true);
+            errorSound.join();
             mainApp->LoadLayout(mainApp->mainPage);
             return;
         }
@@ -4387,14 +4439,17 @@ namespace inst::ui {
         }
         if (this->remoteGridMode) {
             if (Down & HidNpadButton_Plus) {
-                if (!this->isInstalledSection() && !this->isSaveSyncSection() && !this->visibleItems.empty() && this->selectedItems.empty()) {
+                if (!this->isInstalledSection() && !this->isSaveSyncSection() && !this->isCheatsSection() && !this->visibleItems.empty() && this->selectedItems.empty()) {
                     this->selectTitle(this->remoteGridIndex);
                 }
-                if (!this->isInstalledSection() && !this->isSaveSyncSection() && !this->selectedItems.empty())
+                if (!this->isInstalledSection() && !this->isSaveSyncSection() && !this->isCheatsSection() && !this->selectedItems.empty())
                     this->startInstall();
             }
             if (Down & HidNpadButton_Y) {
-                if (!this->isInstalledSection() && !this->isSaveSyncSection()) {
+                if (this->isCheatsSection()) {
+                    this->installAllCheats();
+                    return;
+                } else if (!this->isInstalledSection() && !this->isSaveSyncSection()) {
                     if (this->selectedItems.size() == this->visibleItems.size()) {
                         this->selectedItems.clear();
                         this->updateRememberedSelection();
@@ -4520,6 +4575,8 @@ namespace inst::ui {
                         this->showInstalledDetails();
                     } else if (this->isSaveSyncSection()) {
                         this->handleSaveSyncAction(this->remoteGridIndex);
+                    } else if (this->isCheatsSection()) {
+                        this->handleCheatAction(this->remoteGridIndex);
                     } else {
                         this->selectTitle(this->remoteGridIndex);
                         if (this->visibleItems.size() == 1 && this->selectedItems.size() == 1) {
@@ -4594,6 +4651,8 @@ namespace inst::ui {
                         this->showInstalledDetails();
                     } else if (this->isSaveSyncSection()) {
                         this->handleSaveSyncAction(this->remoteGridIndex);
+                    } else if (this->isCheatsSection()) {
+                        this->handleCheatAction(this->remoteGridIndex);
                     } else {
                         this->selectTitle(this->remoteGridIndex);
                         if (this->visibleItems.size() == 1 && this->selectedItems.size() == 1) {
@@ -4612,6 +4671,8 @@ namespace inst::ui {
                 this->showInstalledDetails();
             } else if (this->isSaveSyncSection()) {
                 this->handleSaveSyncAction(this->menu->GetSelectedIndex());
+            } else if (this->isCheatsSection()) {
+                this->handleCheatAction(this->menu->GetSelectedIndex());
             } else {
                 this->selectTitle(this->menu->GetSelectedIndex());
                 if (this->menu->GetItems().size() == 1 && this->selectedItems.size() == 1) {
@@ -4651,7 +4712,10 @@ namespace inst::ui {
             this->openSearchDialog();
         }
         if (Down & HidNpadButton_Y) {
-            if (!this->isInstalledSection() && !this->isSaveSyncSection()) {
+            if (this->isCheatsSection()) {
+                this->installAllCheats();
+                return;
+            } else if (!this->isInstalledSection() && !this->isSaveSyncSection()) {
                 if (this->selectedItems.size() == this->menu->GetItems().size()) {
                     this->selectedItems.clear();
                     this->updateRememberedSelection();
@@ -4679,7 +4743,7 @@ namespace inst::ui {
             this->startRemote(true);
         }
         if (Down & HidNpadButton_Plus) {
-            if (!this->isInstalledSection() && !this->isSaveSyncSection()) {
+            if (!this->isInstalledSection() && !this->isSaveSyncSection() && !this->isCheatsSection()) {
                 if (this->selectedItems.empty()) {
                     this->selectTitle(this->menu->GetSelectedIndex());
                 }
@@ -4748,6 +4812,10 @@ namespace inst::ui {
                 if (!this->touchMoved && !this->menu->GetItems().empty()) {
                     if (this->isInstalledSection()) {
                         this->showInstalledDetails();
+                    } else if (this->isSaveSyncSection()) {
+                        this->handleSaveSyncAction(this->menu->GetSelectedIndex());
+                    } else if (this->isCheatsSection()) {
+                        this->handleCheatAction(this->menu->GetSelectedIndex());
                     } else {
                         this->selectTitle(this->menu->GetSelectedIndex());
                         if (this->menu->GetItems().size() == 1 && this->selectedItems.size() == 1) {
@@ -4858,6 +4926,148 @@ namespace inst::ui {
         }
 
         mainApp->CreateShowDialog(item.name, body, {"common.ok"_lang}, true);
+    }
+
+    void remoteInstPage::manageLocalCheats(const remoteInstStuff::RemoteItem& item)
+    {
+        std::string error;
+        const auto locals = inst::cheats::List(item.cheatTitleId, error);
+        if (!error.empty()) { mainApp->CreateShowDialog("Cheats", error, {"common.ok"_lang}, true); return; }
+        std::vector<std::string> choices;
+        for (const auto& local : locals) choices.push_back(local.buildId);
+        choices.push_back("Create or edit build ID...");
+        const int selected = mainApp->CreateShowDialog(item.name, "Local Atmosphere cheats for " + item.cheatTitleId, choices, false);
+        if (selected < 0) return;
+        std::string buildId = selected < (int)locals.size() ? locals[selected].buildId : inst::util::softwareKeyboard("Build ID (uppercase hex)", item.cheatBuildId, 64);
+        if (!inst::cheats::IsValidBuildId(buildId)) { mainApp->CreateShowDialog("Cheats", "Build ID must be uppercase hexadecimal.", {"common.ok"_lang}, true); return; }
+        std::string text;
+        inst::cheats::Read(item.cheatTitleId, buildId, text, error); // A new file intentionally starts empty.
+        const bool canAttemptAdminUpload = !inst::config::remoteUser.empty() || !inst::config::remotePass.empty();
+        std::vector<std::string> localActions = {"View", "Edit", "Delete"};
+        if (canAttemptAdminUpload)
+            localActions.push_back("Upload to AeroFoil");
+        localActions.push_back("common.cancel"_lang);
+        const int action = mainApp->CreateShowDialog("Local cheat " + buildId, "View, edit, delete, or upload this Atmosphere cheat.", localActions, false);
+        if (action == 0) { mainApp->CreateShowDialog("Cheat text", text.empty() ? "(empty)" : text, {"common.ok"_lang}, true); return; }
+        if (action == 1) {
+            const std::string edited = inst::util::softwareKeyboard("Cheat text (UTF-8)", text, 8192);
+            if (!inst::cheats::WriteAtomically(item.cheatTitleId, buildId, edited, error)) mainApp->CreateShowDialog("Cheats", error, {"common.ok"_lang}, true);
+            else mainApp->CreateShowDialog("Cheats", "Local cheat saved.", {"common.ok"_lang}, true);
+            return;
+        }
+        if (action == 2) {
+            if (mainApp->CreateShowDialog("Delete cheat?", buildId + ".txt will be removed from Atmosphere.", {"common.yes"_lang, "common.no"_lang}, false) == 0) {
+                if (!inst::cheats::Remove(item.cheatTitleId, buildId, error)) mainApp->CreateShowDialog("Cheats", error, {"common.ok"_lang}, true);
+                else mainApp->CreateShowDialog("Cheats", "Local cheat deleted.", {"common.ok"_lang}, true);
+            }
+            return;
+        }
+        if (canAttemptAdminUpload && action == 3) {
+            const std::string note = inst::util::softwareKeyboard("Server note (optional)", item.cheatNote, 120);
+            if (!remoteInstStuff::UploadCheatText(this->activeRemoteUrl, inst::config::remoteUser, inst::config::remotePass, item.cheatTitleId, buildId, note, text, error)) mainApp->CreateShowDialog("Cheats", error, {"common.ok"_lang}, true);
+            else mainApp->CreateShowDialog("Cheats", "Cheat uploaded to AeroFoil.", {"common.ok"_lang}, true);
+        }
+    }
+
+    void remoteInstPage::showCheatInstallProgress()
+    {
+        this->cheatInstallProgressVisible = true;
+        this->menu->SetVisible(false);
+        this->infoImage->SetVisible(false);
+        this->previewImage->SetVisible(false);
+        this->gridHighlight->SetVisible(false);
+        this->gridTitleText->SetVisible(false);
+        this->imageLoadingText->SetVisible(false);
+        this->listMarqueeMaskRect->SetVisible(false);
+        this->listMarqueeTintRect->SetVisible(false);
+        this->listMarqueeOverlayText->SetVisible(false);
+        this->listMarqueeClipEnabled = false;
+        this->listMarqueeFadeRect->SetVisible(false);
+        this->descriptionRect->SetVisible(false);
+        this->descriptionText->SetVisible(false);
+        for (auto& image : this->gridImages)
+            image->SetVisible(false);
+        for (auto& highlight : this->remoteGridSelectHighlights)
+            highlight->SetVisible(false);
+        for (auto& icon : this->remoteGridSelectIcons)
+            icon->SetVisible(false);
+    }
+
+    void remoteInstPage::installAllCheats()
+    {
+        std::vector<remoteInstStuff::RemoteItem> allCheats;
+        std::unordered_set<std::string> seenTargets;
+        for (const auto& section : this->remoteSections) {
+            if (section.id != "cheats") continue;
+            for (const auto& candidate : section.items) {
+                if (!candidate.isCheat) continue;
+                const std::string targetKey = candidate.cheatTitleId + "/" + candidate.cheatBuildId;
+                if (seenTargets.insert(targetKey).second)
+                    allCheats.push_back(candidate);
+            }
+        }
+        if (allCheats.empty()) { mainApp->CreateShowDialog("Cheats", "No valid cheats are available from this Remote.", {"common.ok"_lang}, true); return; }
+        if (mainApp->CreateShowDialog("Install all cheats?", "Install " + std::to_string(allCheats.size()) + " available cheat file(s) for all titles?", {"common.yes"_lang, "common.no"_lang}, false) != 0)
+            return;
+
+        this->showCheatInstallProgress();
+        int installedCount = 0;
+        std::string firstError;
+        for (std::size_t index = 0; index < allCheats.size(); ++index) {
+            const auto& candidate = allCheats[index];
+            const bool replacing = inst::cheats::IsInstalled(candidate.cheatTitleId, candidate.cheatBuildId);
+            this->setLoadingProgressStage(std::string(replacing ? "Replacing" : "Installing") + " cheat " + std::to_string(index + 1) + "/" + std::to_string(allCheats.size()) + ": " + candidate.name);
+            this->setLoadingProgress(static_cast<int>((index * 100) / allCheats.size()), true);
+            mainApp->CallForRender();
+
+            std::string text, installError;
+            if (remoteInstStuff::DownloadCheatText(candidate, inst::config::remoteUser, inst::config::remotePass, text, installError) &&
+                inst::cheats::WriteAtomically(candidate.cheatTitleId, candidate.cheatBuildId, text, installError)) {
+                installedCount++;
+            } else if (firstError.empty()) {
+                firstError = installError;
+            }
+        }
+        this->setLoadingProgressStage("Cheat installation complete.");
+        this->setLoadingProgress(100, true);
+        mainApp->CallForRender();
+        std::string result = "Installed " + std::to_string(installedCount) + " of " + std::to_string(allCheats.size()) + " available cheat file(s).";
+        if (!firstError.empty()) result += "\nFirst failure: " + firstError;
+        mainApp->CreateShowDialog("Cheats", result, {"common.ok"_lang}, true);
+        this->cheatInstallProgressVisible = false;
+        this->setLoadingProgress(0, false);
+        this->drawMenuItems(false);
+    }
+
+    void remoteInstPage::handleCheatAction(int selectedIndex)
+    {
+        if (selectedIndex < 0 || selectedIndex >= (int)this->visibleItems.size()) return;
+        const auto& item = this->visibleItems[selectedIndex];
+        if (!item.isCheat) { mainApp->CreateShowDialog("Cheats", "This server returned an invalid cheat entry.", {"common.ok"_lang}, true); return; }
+        const bool installed = inst::cheats::IsInstalled(item.cheatTitleId, item.cheatBuildId);
+        std::string details = "Title ID: " + item.cheatTitleId + "\nBuild ID: " + item.cheatBuildId + "\nInstalled: " + (installed ? "Yes" : "No");
+        if (!item.cheatNote.empty()) details += "\nNote: " + item.cheatNote;
+        const int action = mainApp->CreateShowDialog(item.name, details, {"Download / install", "Manage local cheats", "common.cancel"_lang}, false);
+        if (action == 1) { this->manageLocalCheats(item); return; }
+        if (action != 0) return;
+        const bool replacing = inst::cheats::IsInstalled(item.cheatTitleId, item.cheatBuildId);
+        this->showCheatInstallProgress();
+        this->setLoadingProgressStage(std::string(replacing ? "Replacing" : "Installing") + " cheat: " + item.name);
+        this->setLoadingProgress(0, true);
+        mainApp->CallForRender();
+        std::string text, error;
+        if (!remoteInstStuff::DownloadCheatText(item, inst::config::remoteUser, inst::config::remotePass, text, error)) { this->cheatInstallProgressVisible = false; this->setLoadingProgress(0, false); mainApp->CreateShowDialog("Cheats", error, {"common.ok"_lang}, true); this->drawMenuItems(false); return; }
+        this->setLoadingProgressStage(std::string(replacing ? "Replacing" : "Writing") + " cheat: " + item.name);
+        this->setLoadingProgress(75, true);
+        mainApp->CallForRender();
+        if (!inst::cheats::WriteAtomically(item.cheatTitleId, item.cheatBuildId, text, error)) { this->cheatInstallProgressVisible = false; this->setLoadingProgress(0, false); mainApp->CreateShowDialog("Cheats", error, {"common.ok"_lang}, true); this->drawMenuItems(false); return; }
+        this->setLoadingProgressStage("Cheat installation complete.");
+        this->setLoadingProgress(100, true);
+        mainApp->CallForRender();
+        mainApp->CreateShowDialog("Cheats", "Installed to atmosphere/contents/" + item.cheatTitleId + "/cheats/" + item.cheatBuildId + ".txt", {"common.ok"_lang}, true);
+        this->cheatInstallProgressVisible = false;
+        this->setLoadingProgress(0, false);
+        this->drawMenuItems(false);
     }
 
     bool remoteInstPage::tryGetCurrentDescription(std::string& outTitle, std::string& outDescription) const {
