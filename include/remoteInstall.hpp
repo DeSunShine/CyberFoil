@@ -17,6 +17,9 @@ namespace remoteInstStuff {
         std::string saveId;
         std::string saveNote;
         std::string saveCreatedAt;
+        std::string cheatTitleId;
+        std::string cheatBuildId;
+        std::string cheatNote;
         std::uint64_t saveCreatedTs = 0;
         std::uint64_t size;
         std::uint64_t titleId = 0;
@@ -29,6 +32,7 @@ namespace remoteInstStuff {
         bool hasIconUrl = false;
         bool hasAppId = false;
         bool googleDriveWithoutApiKey = false;
+        bool isCheat = false;
     };
 
     struct RemoteSection {
@@ -41,5 +45,7 @@ namespace remoteInstStuff {
     std::vector<RemoteSection> FetchRemoteSections(const std::string& remoteUrl, const std::string& user, const std::string& pass, std::string& error, bool* outUsedLegacyFallback = nullptr, const RemoteFetchProgressCallback& progressCb = RemoteFetchProgressCallback());
     std::string FetchRemoteMotd(const std::string& remoteUrl, const std::string& user, const std::string& pass);
     std::string GetRemoteApiPrefix();
+    bool DownloadCheatText(const RemoteItem& item, const std::string& user, const std::string& pass, std::string& text, std::string& error);
+    bool UploadCheatText(const std::string& remoteUrl, const std::string& user, const std::string& pass, const std::string& titleId, const std::string& buildId, const std::string& note, const std::string& text, std::string& error);
     void installTitleRemote(const std::vector<RemoteItem>& items, int storage, const std::string& sourceLabel);
 }
