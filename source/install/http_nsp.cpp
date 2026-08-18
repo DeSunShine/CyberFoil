@@ -85,8 +85,8 @@ namespace tin::install::nsp
 
     bool stopThreadsHttpNsp;
 
-    HTTPNSP::HTTPNSP(std::string url) :
-        m_download(url), m_displayName(DeriveDisplayNameFromUrl(url))
+    HTTPNSP::HTTPNSP(std::string url, std::vector<std::string> requestHeaders) :
+        m_download(url, std::move(requestHeaders)), m_displayName(DeriveDisplayNameFromUrl(url))
     {
 
     }
@@ -133,7 +133,7 @@ namespace tin::install::nsp
                 return !stopThreadsHttpNsp && args->retryConfirm.approved.load();
             };
 
-            if (args->download->StreamDataRange(args->pfs0Offset, args->ncaSize, streamFunc, retryConfirmFunc) == 1)
+            if (args->download->StreamDataRange(args->pfs0Offset, args->ncaSize, streamFunc, retryConfirmFunc) != 0)
                 stopThreadsHttpNsp = true;
         }
         catch (...) {

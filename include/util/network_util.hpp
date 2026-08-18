@@ -74,22 +74,24 @@ namespace tin::network
             };
 
             std::string m_url;
+            std::vector<std::string> m_requestHeaders;
             HTTPHeader m_header;
             bool m_rangesSupported = false;
             bool m_isJbod = false;
             size_t m_jbodSize = 0;
             std::vector<JbodSegment> m_jbodSegments;
+            std::string m_lastErrorResponse;
 
             static size_t ParseHTMLData(char* bytes, size_t size, size_t numItems, void* userData);
 
         public:
-            HTTPDownload(std::string url);
+            HTTPDownload(std::string url, std::vector<std::string> requestHeaders = {});
     
             void BufferDataRange(void* buffer, size_t offset, size_t size, std::function<void (size_t sizeRead)> progressFunc);
             int StreamDataRange(size_t offset, size_t size, std::function<size_t (u8* bytes, size_t size)> streamFunc, std::function<bool()> retryConfirmFunc = nullptr);
     };
 
-    void SetBasicAuth(const std::string& user, const std::string& pass);
+    void SetBasicAuth(const std::string& user, const std::string& pass, const std::string& trustedOrigin = "");
     void ClearBasicAuth();
 
     void NSULDrop(std::string url);

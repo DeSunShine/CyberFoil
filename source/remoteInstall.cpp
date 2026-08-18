@@ -14,6 +14,7 @@
 #include <zstd.h>
 #include <mbedtls/aes.h>
 #include "remoteInstall.hpp"
+#include "cheat_manager.hpp"
 #include "install/http_nsp.hpp"
 #include "install/http_xci.hpp"
 #include "install/install.hpp"
@@ -95,6 +96,31 @@ namespace {
         if (!url.empty() && url.back() == '/')
             url.pop_back();
         return url;
+    }
+
+    // Basic-auth credentials belong only to the remote the user configured.  A
+    // legacy index may link arbitrary directory manifests, so do not forward
+    // them to a different origin.
+    std::string GetUrlOrigin(const std::string& url)
+    {
+        const std::size_t schemeEnd = url.find("://");
+        if (schemeEnd == std::string::npos || schemeEnd == 0)
+            return {};
+
+        const std::size_t authorityStart = schemeEnd + 3;
+        const std::size_t authorityEnd = url.find_first_of("/?#", authorityStart);
+        std::string authority = url.substr(authorityStart, authorityEnd - authorityStart);
+        const std::size_t userInfoEnd = authority.rfind('@');
+        if (userInfoEnd != std::string::npos)
+            authority.erase(0, userInfoEnd + 1);
+        if (authority.empty())
+            return {};
+
+        std::string origin = url.substr(0, schemeEnd) + "://" + authority;
+        std::transform(origin.begin(), origin.end(), origin.begin(), [](unsigned char c) {
+            return static_cast<char>(std::tolower(c));
+        });
+        return origin;
     }
 
     int HexNibble(char c)
@@ -517,10 +543,10 @@ namespace {
         return ext == ".xci" || ext == ".xcz";
     }
 
-    bool IsXciMagic(const std::string& url)
+    bool IsXciMagic(const std::string& url, const std::vector<std::string>& requestHeaders)
     {
         try {
-            tin::network::HTTPDownload download(url);
+            tin::network::HTTPDownload download(url, requestHeaders);
             u32 magic = 0;
             download.BufferDataRange(&magic, 0xF000, sizeof(magic), nullptr);
             if (magic == 0x30534648)
@@ -561,6 +587,14 @@ namespace {
         if (!urlPath.empty() && urlPath[0] == '/')
             return baseUrl + urlPath;
         return baseUrl + "/" + urlPath;
+    }
+
+    bool IsGoogleDriveApiUrlWithoutKey(const std::string& url)
+    {
+        std::string lower = url;
+        std::transform(lower.begin(), lower.end(), lower.begin(), [](unsigned char c) { return std::tolower(c); });
+        return lower.find("www.googleapis.com/drive/") != std::string::npos &&
+            lower.find("?key=") == std::string::npos && lower.find("&key=") == std::string::npos;
     }
 
     std::uint64_t GetOfflineLookupTitleId(const remoteInstStuff::RemoteItem& item);
@@ -1153,6 +1187,9 @@ namespace {
                 error = "Remote login failed. " + remote["error"].get<std::string>();
                 return sections;
             }
+            std::string googleApiKey;
+            if (remote.contains("googleApiKey") && remote["googleApiKey"].is_string())
+                googleApiKey = TrimAscii(remote["googleApiKey"].get<std::string>());
             if (!remote.contains("sections") || !remote["sections"].is_array()) {
                 std::string lower = body;
                 std::transform(lower.begin(), lower.end(), lower.begin(), [](unsigned char c) { return std::tolower(c); });
@@ -1187,7 +1224,21 @@ namespace {
                         urlPath = urlPath.substr(0, hashPos);
                     }
 
-                    std::string fullUrl = BuildFullUrl(baseUrl, urlPath);
+                    std::string fullUrl;
+                    if (urlPath.rfind("gdrive:", 0) == 0) {
+                        std::string fileId = urlPath.substr(std::strlen("gdrive:"));
+                        while (!fileId.empty() && fileId.front() == '/')
+                            fileId.erase(0, 1);
+                        if (fileId.empty()) {
+                            error = "Custom index contains an invalid Google Drive file ID.";
+                            return {};
+                        }
+                        fullUrl = "https://www.googleapis.com/drive/v3/files/" + fileId + "?alt=media";
+                        if (!googleApiKey.empty())
+                            fullUrl += "&key=" + googleApiKey;
+                    } else {
+                        fullUrl = BuildFullUrl(baseUrl, urlPath);
+                    }
 
                     std::string name;
                     const bool hasExplicitName = entry.contains("name");
@@ -1203,7 +1254,10 @@ namespace {
                         remoteInstStuff::RemoteItem item;
                         item.name = name;
                         item.url = fullUrl;
+                        item.indexSourceUrl = baseUrl;
                         item.size = size;
+                        item.googleDriveWithoutApiKey = (urlPath.rfind("gdrive:", 0) == 0 && googleApiKey.empty()) ||
+                            IsGoogleDriveApiUrlWithoutKey(fullUrl);
                         std::uint64_t titleId = 0;
                         std::uint32_t appVersion = 0;
                         std::int32_t appType = -1;
@@ -1264,6 +1318,17 @@ namespace {
                             item.saveNote = entry["save_note"].get<std::string>();
                         else if (entry.contains("saveNote") && entry["saveNote"].is_string())
                             item.saveNote = entry["saveNote"].get<std::string>();
+                        // AeroFoil cheats are catalog entries, not installable content.
+                        const bool cheatSection = (parsed.id == "cheats");
+                        const bool cheatType = entry.contains("app_type") && entry["app_type"].is_string() && entry["app_type"].get<std::string>() == "CHEAT";
+                        if (cheatSection || cheatType) {
+                            item.cheatTitleId = entry.value("title_id", "");
+                            item.cheatBuildId = entry.value("build_id", "");
+                            item.cheatNote = entry.value("note", "");
+                            item.isCheat = inst::cheats::IsValidTitleId(item.cheatTitleId) && inst::cheats::IsValidBuildId(item.cheatBuildId);
+                            if (entry.contains("title_name") && entry["title_name"].is_string())
+                                item.name = entry["title_name"].get<std::string>() + " — " + item.cheatBuildId;
+                        }
                         if (entry.contains("created_at") && entry["created_at"].is_string())
                             item.saveCreatedAt = entry["created_at"].get<std::string>();
                         else if (entry.contains("createdAt") && entry["createdAt"].is_string())
@@ -1290,6 +1355,14 @@ namespace {
                     }
                 }
 
+                if (parsed.id == "cheats") {
+                    // Keep all builds for a title adjacent in the dedicated Cheats section.
+                    std::stable_sort(parsed.items.begin(), parsed.items.end(), [](const auto& a, const auto& b) {
+                        if (a.name != b.name)
+                            return inst::util::ignoreCaseCompare(a.name, b.name);
+                        return a.cheatBuildId < b.cheatBuildId;
+                    });
+                }
                 if (!parsed.items.empty())
                     sections.push_back(parsed);
             }
@@ -1537,7 +1610,8 @@ namespace remoteInstStuff {
         }
 
         bool AppendRemoteItemFromEntry(const nlohmann::json& entry, const std::string& baseUrl,
-            std::vector<RemoteItem>& items, std::unordered_set<std::string>& seenItemUrls)
+            const std::string& googleApiKey, const std::vector<std::string>& requestHeaders, std::vector<RemoteItem>& items,
+            std::unordered_set<std::string>& seenItemUrls, std::string& error)
         {
             std::string rawUrl;
             if (entry.is_string()) {
@@ -1579,7 +1653,21 @@ namespace remoteInstStuff {
                 urlPath = urlPath.substr(0, hashPos);
             }
 
-            const std::string fullUrl = BuildFullUrl(baseUrl, urlPath);
+            std::string fullUrl;
+            // Tinfoil custom indexes use gdrive:/<file-id>, optionally followed by
+            // #<filename>.  Resolve it here so the installer receives a normal HTTP URL.
+            if (urlPath.rfind("gdrive:", 0) == 0) {
+                std::string fileId = urlPath.substr(std::strlen("gdrive:"));
+                while (!fileId.empty() && fileId.front() == '/')
+                    fileId.erase(0, 1);
+                if (fileId.empty())
+                    return false;
+                fullUrl = "https://www.googleapis.com/drive/v3/files/" + fileId + "?alt=media";
+                if (!googleApiKey.empty())
+                    fullUrl += "&key=" + googleApiKey;
+            } else {
+                fullUrl = BuildFullUrl(baseUrl, urlPath);
+            }
             if (fullUrl.empty())
                 return false;
             if (!seenItemUrls.insert(fullUrl).second)
@@ -1600,7 +1688,11 @@ namespace remoteInstStuff {
             RemoteItem item;
             item.name = name;
             item.url = fullUrl;
+            item.indexSourceUrl = baseUrl;
+            item.requestHeaders = requestHeaders;
             item.size = size;
+            item.googleDriveWithoutApiKey = (urlPath.rfind("gdrive:", 0) == 0 && googleApiKey.empty()) ||
+                IsGoogleDriveApiUrlWithoutKey(fullUrl);
             ApplyLegacyMetadataFromName(name, item);
 
             std::uint32_t releaseDate = 0;
@@ -1672,12 +1764,16 @@ namespace remoteInstStuff {
         }
 
         bool AppendLegacyFilesFromJson(const nlohmann::json& files, const std::string& baseUrl,
-            std::vector<RemoteItem>& items, std::unordered_set<std::string>& seenItemUrls)
+            const std::string& googleApiKey, const std::vector<std::string>& requestHeaders, std::vector<RemoteItem>& items,
+            std::unordered_set<std::string>& seenItemUrls, std::string& error)
         {
             if (files.is_array()) {
                 bool any = false;
-                for (const auto& entry : files)
-                    any = AppendRemoteItemFromEntry(entry, baseUrl, items, seenItemUrls) || any;
+                for (const auto& entry : files) {
+                    any = AppendRemoteItemFromEntry(entry, baseUrl, googleApiKey, requestHeaders, items, seenItemUrls, error) || any;
+                    if (!error.empty())
+                        return false;
+                }
                 return any;
             }
 
@@ -1692,13 +1788,17 @@ namespace remoteInstStuff {
                     nlohmann::json normalized = value;
                     if ((!normalized.contains("name") || !normalized["name"].is_string()) && !key.empty())
                         normalized["name"] = key;
-                    any = AppendRemoteItemFromEntry(normalized, baseUrl, items, seenItemUrls) || any;
+                    any = AppendRemoteItemFromEntry(normalized, baseUrl, googleApiKey, requestHeaders, items, seenItemUrls, error) || any;
+                    if (!error.empty())
+                        return false;
                 } else if (value.is_string()) {
                     nlohmann::json normalized = {
                         {"name", key},
                         {"url", value.get<std::string>()}
                     };
-                    any = AppendRemoteItemFromEntry(normalized, baseUrl, items, seenItemUrls) || any;
+                    any = AppendRemoteItemFromEntry(normalized, baseUrl, googleApiKey, requestHeaders, items, seenItemUrls, error) || any;
+                    if (!error.empty())
+                        return false;
                 } else if (value.is_array()) {
                     for (const auto& sub : value) {
                         if (!sub.is_string())
@@ -1707,7 +1807,9 @@ namespace remoteInstStuff {
                             {"name", key},
                             {"url", sub.get<std::string>()}
                         };
-                        any = AppendRemoteItemFromEntry(normalized, baseUrl, items, seenItemUrls) || any;
+                        any = AppendRemoteItemFromEntry(normalized, baseUrl, googleApiKey, requestHeaders, items, seenItemUrls, error) || any;
+                        if (!error.empty())
+                            return false;
                     }
                 }
             }
@@ -1826,30 +1928,191 @@ namespace remoteInstStuff {
             return "";
         }
 
+        bool ApplyCustomIndexLocations(const nlohmann::json& locations, std::string& error)
+        {
+            if (!locations.is_array()) {
+                error = "Custom index locations must be an array.";
+                return false;
+            }
+
+            std::vector<inst::config::RemoteProfile> savedRemotes = inst::config::LoadRemotes();
+            for (const auto& location : locations) {
+                std::string url;
+                std::string action = "add";
+                std::string title;
+                if (location.is_string()) {
+                    url = location.get<std::string>();
+                } else if (location.is_object()) {
+                    if (location.contains("url") && location["url"].is_string())
+                        url = location["url"].get<std::string>();
+                    if (location.contains("action") && location["action"].is_string())
+                        action = location["action"].get<std::string>();
+                    for (const char* key : {"title", "name", "label"}) {
+                        if (location.contains(key) && location[key].is_string()) {
+                            title = TrimAscii(location[key].get<std::string>());
+                            if (!title.empty())
+                                break;
+                        }
+                    }
+                } else {
+                    error = "Custom index contains an invalid location entry.";
+                    return false;
+                }
+
+                url = TrimAscii(url);
+                std::transform(action.begin(), action.end(), action.begin(), [](unsigned char c) { return std::tolower(c); });
+                std::string protocol;
+                std::string host;
+                std::string path;
+                int port = 0;
+                if (url.empty() || !inst::config::ParseRemoteUrl(url, protocol, host, port, path)) {
+                    error = "Custom index location must be a valid HTTP(S) URL.";
+                    return false;
+                }
+
+                inst::config::RemoteProfile profile;
+                profile.protocol = protocol;
+                profile.host = host;
+                profile.port = port;
+                profile.path = path;
+                const std::string derivedTitle = path.empty() ? host : (host + path);
+                // Legacy custom-index locations may omit a title, while saved
+                // profiles always require one.
+                profile.title = title.empty() ? derivedTitle : title;
+                const std::string normalizedUrl = inst::config::BuildRemoteUrl(profile);
+                auto saved = std::find_if(savedRemotes.begin(), savedRemotes.end(), [&](const auto& candidate) {
+                    return inst::config::BuildRemoteUrl(candidate) == normalizedUrl;
+                });
+
+                if (action == "disable") {
+                    if (saved != savedRemotes.end()) {
+                        std::string deleteError;
+                        if (!inst::config::DeleteRemote(saved->fileName)) {
+                            error = "Unable to disable custom index location.";
+                            return false;
+                        }
+                        savedRemotes.erase(saved);
+                    }
+                } else if (action == "add" || action == "enable") {
+                    if (saved == savedRemotes.end()) {
+                        std::string saveError;
+                        if (!inst::config::SaveRemote(profile, &saveError)) {
+                            error = saveError.empty() ? "Unable to save custom index location." : saveError;
+                            return false;
+                        }
+                        savedRemotes.push_back(profile);
+                    } else if (!title.empty() && saved->title == derivedTitle) {
+                        // Repair profiles saved by older builds that had to derive
+                        // the title because the legacy response title was ignored.
+                        profile.fileName = saved->fileName;
+                        std::string saveError;
+                        if (!inst::config::SaveRemote(profile, &saveError)) {
+                            error = saveError.empty() ? "Unable to update custom index location." : saveError;
+                            return false;
+                        }
+                        *saved = profile;
+                    }
+                } else {
+                    error = "Custom index location action must be add, enable, or disable.";
+                    return false;
+                }
+            }
+            return true;
+        }
+
+        bool ValidateCustomIndexOptions(const nlohmann::json& remote, std::string& error)
+        {
+            const auto requireString = [&](const char* key) {
+                if (remote.contains(key) && !remote[key].is_string()) {
+                    error = std::string("Custom index field '") + key + "' must be a string.";
+                    return false;
+                }
+                return true;
+            };
+            const auto requireStringArray = [&](const char* key) {
+                if (!remote.contains(key))
+                    return true;
+                if (!remote[key].is_array() || !std::all_of(remote[key].begin(), remote[key].end(), [](const auto& value) { return value.is_string(); })) {
+                    error = std::string("Custom index field '") + key + "' must be an array of strings.";
+                    return false;
+                }
+                return true;
+            };
+
+            if (!requireString("success") || !requireString("error") || !requireString("referrer") ||
+                !requireString("googleApiKey") || !requireString("clientCertPub") ||
+                !requireString("clientCertKey") || !requireString("themeError") ||
+                !requireStringArray("oneFichierKeys") || !requireStringArray("headers") ||
+                !requireStringArray("themeBlackList") || !requireStringArray("themeWhiteList"))
+                return false;
+            if (remote.contains("version") && !remote["version"].is_number()) {
+                error = "Custom index field 'version' must be a number.";
+                return false;
+            }
+            if (remote.contains("titledb") && !remote["titledb"].is_object()) {
+                error = "Custom index field 'titledb' must be an object.";
+                return false;
+            }
+            return true;
+        }
+
         bool CollectRemoteItemsFromJson(const nlohmann::json& remote, const std::string& baseUrl,
             const std::string& user, const std::string& pass, std::vector<RemoteItem>& items,
             std::unordered_set<std::string>& seenItemUrls, std::unordered_set<std::string>& seenManifestUrls,
-            std::string& error, const RemoteFetchProgressCallback& progressCb)
+            std::string& error, const RemoteFetchProgressCallback& progressCb, const std::string& inheritedGoogleApiKey = "",
+            const std::string& credentialOrigin = "", const std::vector<std::string>& inheritedRequestHeaders = {})
         {
             if (!remote.is_object()) {
                 error = "Invalid Remote response.";
                 return false;
             }
+            if (!ValidateCustomIndexOptions(remote, error))
+                return false;
             if (remote.contains("error") && remote["error"].is_string()) {
                 error = remote["error"].get<std::string>();
                 return false;
             }
+
+            std::string googleApiKey = inheritedGoogleApiKey;
+            if (remote.contains("googleApiKey") && remote["googleApiKey"].is_string())
+                googleApiKey = TrimAscii(remote["googleApiKey"].get<std::string>());
+
+            // Headers are a download policy, not manifest-request headers. A
+            // directory inherits its parent's policy unless it declares its
+            // own headers, which intentionally replace the inherited set.
+            std::vector<std::string> requestHeaders = inheritedRequestHeaders;
+            if (remote.contains("headers")) {
+                requestHeaders.clear();
+                for (const auto& headerValue : remote["headers"]) {
+                    const std::string header = TrimAscii(headerValue.get<std::string>());
+                    const std::size_t colon = header.find(':');
+                    if (colon == std::string::npos || colon == 0 ||
+                        header.find_first_of("\r\n") != std::string::npos) {
+                        error = "Custom index contains an invalid request header.";
+                        return false;
+                    }
+                    requestHeaders.push_back(header);
+                }
+            }
+
+            if (remote.contains("locations") && !ApplyCustomIndexLocations(remote["locations"], error))
+                return false;
 
             bool handled = false;
 
             if (remote.contains("sections") && remote["sections"].is_array()) {
                 std::string parseError;
                 std::vector<RemoteSection> parsedSections = ParseRemoteSectionsBody(remote.dump(), baseUrl, parseError);
+                if (parsedSections.empty() && !parseError.empty()) {
+                    error = parseError;
+                    return false;
+                }
                 if (!parsedSections.empty()) {
                     for (const auto& section : parsedSections) {
-                        for (const auto& sectionItem : section.items) {
+                        for (auto sectionItem : section.items) {
                             if (!seenItemUrls.insert(sectionItem.url).second)
                                 continue;
+                            sectionItem.requestHeaders = requestHeaders;
                             items.push_back(sectionItem);
                         }
                     }
@@ -1858,12 +2121,16 @@ namespace remoteInstStuff {
             }
 
             if (remote.contains("files")) {
-                if (AppendLegacyFilesFromJson(remote["files"], baseUrl, items, seenItemUrls))
+                if (AppendLegacyFilesFromJson(remote["files"], baseUrl, googleApiKey, requestHeaders, items, seenItemUrls, error))
                     handled = true;
+                else if (!error.empty())
+                    return false;
             }
             if (remote.contains("paths")) {
-                if (AppendLegacyFilesFromJson(remote["paths"], baseUrl, items, seenItemUrls))
+                if (AppendLegacyFilesFromJson(remote["paths"], baseUrl, googleApiKey, requestHeaders, items, seenItemUrls, error))
                     handled = true;
+                else if (!error.empty())
+                    return false;
             }
             if (remote.contains("titledb")) {
                 if (AppendLegacyTitleDbFromJson(remote["titledb"], baseUrl, items, seenItemUrls))
@@ -1883,7 +2150,10 @@ namespace remoteInstStuff {
                     if (!seenManifestUrls.insert(directoryUrl).second)
                         continue;
 
-                    FetchResult directoryFetch = FetchRemoteResponse(directoryUrl, user, pass, progressCb);
+                    const bool sameCredentialOrigin = !credentialOrigin.empty() &&
+                        GetUrlOrigin(directoryUrl) == credentialOrigin;
+                    FetchResult directoryFetch = FetchRemoteResponse(
+                        directoryUrl, sameCredentialOrigin ? user : "", sameCredentialOrigin ? pass : "", progressCb);
                     if (!ValidateRemoteResponse(directoryFetch, error))
                         return false;
 
@@ -1895,7 +2165,8 @@ namespace remoteInstStuff {
                         return false;
                     }
 
-                    if (!CollectRemoteItemsFromJson(directoryJson, baseUrl, user, pass, items, seenItemUrls, seenManifestUrls, error, progressCb))
+                    if (!CollectRemoteItemsFromJson(directoryJson, directoryUrl, user, pass, items, seenItemUrls, seenManifestUrls,
+                        error, progressCb, googleApiKey, credentialOrigin, requestHeaders))
                         return false;
                 }
             }
@@ -1929,7 +2200,8 @@ namespace remoteInstStuff {
             std::unordered_set<std::string> seenItemUrls;
             std::unordered_set<std::string> seenManifestUrls;
             seenManifestUrls.insert(baseUrl);
-            if (!CollectRemoteItemsFromJson(remote, baseUrl, user, pass, items, seenItemUrls, seenManifestUrls, error, progressCb))
+            if (!CollectRemoteItemsFromJson(remote, baseUrl, user, pass, items, seenItemUrls, seenManifestUrls,
+                error, progressCb, "", GetUrlOrigin(baseUrl)))
                 return items;
         }
         catch (...) {
@@ -2012,6 +2284,71 @@ namespace remoteInstStuff {
         if (tryLegacyFallback())
             return sections;
         return sections;
+    }
+
+    bool DownloadCheatText(const RemoteItem& item, const std::string& user, const std::string& pass, std::string& text, std::string& error)
+    {
+        text.clear(); error.clear();
+        if (!item.isCheat || item.url.empty() || !inst::cheats::IsValidTitleId(item.cheatTitleId) || !inst::cheats::IsValidBuildId(item.cheatBuildId)) {
+            error = "Invalid cheat entry.";
+            return false;
+        }
+        FetchResult fetch = FetchRemoteResponse(item.url, user, pass);
+        if (!ValidateRemoteResponse(fetch, error))
+            return false;
+        if (fetch.responseCode == 404 || fetch.responseCode == 405) {
+            error = "This AeroFoil server does not support the cheat download API.";
+            return false;
+        }
+        if (fetch.responseCode < 200 || fetch.responseCode >= 300) {
+            error = "Cheat download failed (HTTP " + std::to_string(fetch.responseCode) + ").";
+            return false;
+        }
+        text = std::move(fetch.body);
+        return true;
+    }
+
+    bool UploadCheatText(const std::string& remoteUrl, const std::string& user, const std::string& pass, const std::string& titleId, const std::string& buildId, const std::string& note, const std::string& text, std::string& error)
+    {
+        error.clear();
+        if (user.empty() && pass.empty()) { error = "Cheat upload requires authenticated AeroFoil admin credentials."; return false; }
+        if (!inst::cheats::IsValidTitleId(titleId) || !inst::cheats::IsValidBuildId(buildId)) { error = "Invalid title ID or build ID."; return false; }
+        const std::string baseUrl = NormalizeRemoteUrl(remoteUrl);
+        if (baseUrl.empty()) { error = "Remote URL is empty."; return false; }
+        const std::string url = BuildFullUrl(baseUrl, "/api/cheats");
+        CURL* curl = curl_easy_init();
+        if (!curl) { error = "Failed to initialize curl."; return false; }
+        std::string response;
+        curl_mime* mime = curl_mime_init(curl);
+        auto addField = [&](const char* name, const std::string& value) { curl_mimepart* part = curl_mime_addpart(mime); curl_mime_name(part, name); curl_mime_data(part, value.data(), value.size()); };
+        addField("title_id", titleId); addField("build_id", buildId); addField("content", text);
+        if (!note.empty()) addField("note", note);
+        curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
+        curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
+        curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 0L);
+        const std::string userAgent = inst::config::remoteLegacyMode ? std::string() : inst::curl::getDefaultUserAgent();
+        curl_easy_setopt(curl, CURLOPT_USERAGENT, userAgent.c_str());
+        curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, WriteToString);
+        curl_easy_setopt(curl, CURLOPT_WRITEDATA, &response);
+        curl_easy_setopt(curl, CURLOPT_TIMEOUT_MS, kRemoteRequestTimeoutMs);
+        curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT_MS, kRemoteConnectTimeoutMs);
+        curl_easy_setopt(curl, CURLOPT_MIMEPOST, mime);
+        struct curl_slist* headerList = nullptr;
+        for (const auto& header : BuildLegacyHeaders(url, user, pass)) headerList = curl_slist_append(headerList, header.c_str());
+        if (headerList) curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headerList);
+        const std::string authValue = user + ":" + pass;
+        curl_easy_setopt(curl, CURLOPT_HTTPAUTH, CURLAUTH_BASIC);
+        curl_easy_setopt(curl, CURLOPT_USERPWD, authValue.c_str());
+        const CURLcode rc = curl_easy_perform(curl);
+        long responseCode = 0; curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &responseCode);
+        if (headerList) curl_slist_free_all(headerList);
+        curl_mime_free(mime); curl_easy_cleanup(curl);
+        if (rc != CURLE_OK) { error = curl_easy_strerror(rc); return false; }
+        if (responseCode == 401 || responseCode == 403) { error = "AeroFoil rejected the upload: this Remote account is not an admin."; return false; }
+        if (responseCode == 404 || responseCode == 405) { error = "This AeroFoil server does not support cheat uploads."; return false; }
+        if (responseCode < 200 || responseCode >= 300) { error = "Cheat upload failed (HTTP " + std::to_string(responseCode) + ")."; return false; }
+        try { const auto body = nlohmann::json::parse(response); if (body.contains("success") && body["success"].is_boolean() && !body["success"].get<bool>()) { error = body.value("error", "AeroFoil rejected the upload."); return false; } } catch (...) { /* Some AeroFoil versions return an empty success body. */ }
+        return true;
     }
 
     namespace {
@@ -2174,8 +2511,8 @@ namespace remoteInstStuff {
             return false;
         }
 
-        static bool InstallXciHttpStream(const std::string& url, NcmStorageId dest_storage) {
-            tin::network::HTTPDownload download(url);
+        static bool InstallXciHttpStream(const std::string& url, const std::vector<std::string>& requestHeaders, NcmStorageId dest_storage) {
+            tin::network::HTTPDownload download(url, requestHeaders);
             HttpStreamSource source(download);
 
             std::vector<StreamCollectionEntry> collections;
@@ -2428,30 +2765,38 @@ namespace remoteInstStuff {
         }
 
         if (!inst::config::remoteUser.empty() || !inst::config::remotePass.empty())
-            tin::network::SetBasicAuth(inst::config::remoteUser, inst::config::remotePass);
+            tin::network::SetBasicAuth(inst::config::remoteUser, inst::config::remotePass,
+                NormalizeRemoteUrl(inst::config::remoteUrl));
         else
             tin::network::ClearBasicAuth();
 
         std::string currentName;
+        bool currentGoogleDriveWithoutApiKey = false;
+        std::string currentIndexSourceUrl;
         try {
             for (size_t i = 0; i < items.size(); i++) {
                 LOG_DEBUG("%s %s\n", "Install request from", items[i].url.c_str());
                 currentName = names[i];
+                currentGoogleDriveWithoutApiKey = items[i].googleDriveWithoutApiKey;
+                currentIndexSourceUrl = items[i].indexSourceUrl;
                 inst::diag::NoteTransferReceived(currentName);
+                if (!currentIndexSourceUrl.empty())
+                    inst::diag::NoteStep("Index source URL: " + currentIndexSourceUrl, false);
                 UpdateInstallIcon(items[i]);
                 inst::ui::instPage::setTopInstInfoText("inst.info_page.top_info0"_lang + currentName + sourceLabel);
                 std::unique_ptr<tin::install::Install> installTask;
-                bool isXci = IsXciExtension(items[i].name) || IsXciExtension(items[i].url) || IsXciMagic(items[i].url);
+                bool isXci = IsXciExtension(items[i].name) || IsXciExtension(items[i].url) ||
+                    IsXciMagic(items[i].url, items[i].requestHeaders);
                 if (isXci) {
                     inst::ui::instPage::setInstInfoText("Transfer received. Install started...");
                     inst::diag::NoteInstallStarted(currentName);
-                    if (!InstallXciHttpStream(items[i].url, destStorageId)) {
+                    if (!InstallXciHttpStream(items[i].url, items[i].requestHeaders, destStorageId)) {
                         THROW_FORMAT("Failed to install XCI from remote.");
                     }
                     inst::diag::RecordSuccess(currentName);
                     continue;
                 } else {
-                    auto httpNSP = std::make_shared<tin::install::nsp::HTTPNSP>(items[i].url);
+                    auto httpNSP = std::make_shared<tin::install::nsp::HTTPNSP>(items[i].url, items[i].requestHeaders);
                     installTask = std::make_unique<tin::install::nsp::NSPInstall>(destStorageId, inst::config::ignoreReqVers, httpNSP);
                 }
 
@@ -2484,7 +2829,22 @@ namespace remoteInstStuff {
                 if (!inst::config::soundEnabled) audioPath = "";
                 if (std::filesystem::exists(inst::config::appDir + "/bark.wav")) audioPath = inst::config::appDir + "/bark.wav";
                 std::thread audioThread(inst::util::playAudio, audioPath);
-                inst::ui::mainApp->CreateShowDialog("inst.info_page.failed"_lang + failedName + "!", inst::diag::BuildUserMessage(failure), {"common.ok"_lang}, true);
+                std::string lowerError = errorText;
+                std::transform(lowerError.begin(), lowerError.end(), lowerError.begin(), [](unsigned char c) { return std::tolower(c); });
+                const bool googleApiKeyRequired = currentGoogleDriveWithoutApiKey &&
+                    (lowerError.find("api key") != std::string::npos ||
+                     lowerError.find("apikey") != std::string::npos);
+                const bool googleDriveFileUnavailable = currentGoogleDriveWithoutApiKey &&
+                    lowerError.find("http status 404") != std::string::npos;
+                const std::string userMessage = googleApiKeyRequired
+                    ? "Selected file requires a Google Drive API key. It is missing from the index file."
+                    : (googleDriveFileUnavailable
+                        ? "Google Drive could not find this file or does not allow access to it. Verify the gdrive file ID and sharing permissions."
+                        : inst::diag::BuildUserMessage(failure));
+                const std::string messageWithSource = currentIndexSourceUrl.empty()
+                    ? userMessage
+                    : userMessage + "\n\nIndex source: " + currentIndexSourceUrl;
+                inst::ui::mainApp->CreateShowDialog("inst.info_page.failed"_lang + failedName + "!", messageWithSource, {"common.ok"_lang}, true);
                 audioThread.join();
             }
             nspInstalled = false;

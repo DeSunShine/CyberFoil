@@ -18,6 +18,7 @@ namespace inst::util {
     std::string shortenString(std::string ourString, int ourLength, bool isFile);
     std::string readTextFromFile(std::string ourFile);
     std::string softwareKeyboard(std::string guideText, std::string initialText, int LenMax);
+    std::string numericKeyboard(std::string guideText, std::string initialText, int LenMax);
     std::string getDriveFileName(std::string fileId);
     std::vector<uint32_t> setClockSpeed(int deviceToClock, uint32_t clockSpeed);
     std::string getIPAddress();

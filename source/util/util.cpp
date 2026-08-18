@@ -277,6 +277,27 @@ namespace inst::util {
         return "";
     }
 
+    std::string numericKeyboard(std::string guideText, std::string initialText, int LenMax) {
+        Result rc = 0;
+        SwkbdConfig kbd;
+        char tmpoutstr[LenMax + 1] = {0};
+        rc = swkbdCreate(&kbd, 0);
+        if (R_SUCCEEDED(rc)) {
+            swkbdConfigMakePresetDefault(&kbd);
+            swkbdConfigSetType(&kbd, SwkbdType_NumPad);
+            swkbdConfigSetGuideText(&kbd, guideText.c_str());
+            swkbdConfigSetInitialText(&kbd, initialText.c_str());
+            swkbdConfigSetStringLenMax(&kbd, LenMax);
+            rc = swkbdShow(&kbd, tmpoutstr, sizeof(tmpoutstr));
+            swkbdClose(&kbd);
+            if (inst::ui::mainApp != nullptr)
+                inst::ui::mainApp->RefreshInputDevice(true);
+            if (R_SUCCEEDED(rc) && tmpoutstr[0] != 0)
+                return std::string(tmpoutstr);
+        }
+        return "";
+    }
+
     std::string getDriveFileName(std::string fileId) {
         std::string htmlData = inst::curl::downloadToBuffer("https://drive.google.com/file/d/" + fileId  + "/view");
         if (htmlData.size() > 0) {

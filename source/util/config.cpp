@@ -31,6 +31,7 @@ namespace inst::config {
     bool validateNCAs;
     bool remoteHideInstalled;
     bool remoteHideInstalledSection;
+    bool remoteHideIncompatibleCheats;
     bool remoteAllBaseOnly;
     bool remoteLegacyMode;
     bool remoteStartGridMode;
@@ -80,7 +81,8 @@ namespace inst::config {
 
         std::string RemoteDedupKey(const inst::config::RemoteProfile& remote)
         {
-            return inst::config::BuildRemoteUrl(remote) + "\x1f" + Trim(remote.username) + "\x1f" + Trim(remote.password);
+            return inst::config::BuildRemoteUrl(remote) + "\x1f" + Trim(remote.username) + "\x1f" + Trim(remote.password) +
+                "\x1f" + (remote.legacyMode ? "legacy" : "cyberfoil");
         }
 
         bool ParseBoolTextValue(const std::string& value, bool& out)
@@ -172,7 +174,8 @@ namespace inst::config {
                     {"username", normalized.username},
                     {"password", normalized.password},
                     {"title", normalized.title},
-                    {"favourite", normalized.favourite}
+                    {"favourite", normalized.favourite},
+                    {"legacyMode", normalized.legacyMode}
                 }}
             };
         }
@@ -316,6 +319,8 @@ namespace inst::config {
                 parsed.username = remoteNode->value("username", "");
                 parsed.password = remoteNode->value("password", "");
                 parsed.title = remoteNode->value("title", "");
+                if (remoteNode->contains("legacyMode") && (*remoteNode)["legacyMode"].is_boolean())
+                    parsed.legacyMode = (*remoteNode)["legacyMode"].get<bool>();
 
                 if (!remoteNode->contains("host") || !(*remoteNode)["host"].is_string())
                     needsRewrite = true;
@@ -730,6 +735,14 @@ namespace inst::config {
         inst::config::remoteUrl = url;
         inst::config::remoteUser = remote.username;
         inst::config::remotePass = remote.password;
+        inst::config::remoteLegacyMode = remote.legacyMode;
+        if (inst::config::remoteLegacyMode) {
+            inst::config::httpUserAgentMode = "tinfoil";
+            inst::config::httpUserAgent.clear();
+        } else if (NormalizeHttpUserAgentMode(inst::config::httpUserAgentMode) == "tinfoil") {
+            inst::config::httpUserAgentMode = "default";
+            inst::config::httpUserAgent.clear();
+        }
         if (writeConfig)
             inst::config::setConfig();
         return true;
@@ -758,6 +771,7 @@ namespace inst::config {
             {"httpUserAgent", httpUserAgent},
             {"remoteHideInstalled", remoteHideInstalled},
             {"remoteHideInstalledSection", remoteHideInstalledSection},
+            {"remoteHideIncompatibleCheats", remoteHideIncompatibleCheats},
             {"remoteAllBaseOnly", remoteAllBaseOnly},
             {"remoteLegacyMode", remoteLegacyMode},
             {"remoteStartGridMode", remoteStartGridMode},
@@ -792,6 +806,7 @@ namespace inst::config {
         httpUserAgent.clear();
         remoteHideInstalled = true;
         remoteHideInstalledSection = true;
+        remoteHideIncompatibleCheats = false;
         remoteAllBaseOnly = true;
         remoteLegacyMode = false;
         remoteStartGridMode = false;
@@ -828,6 +843,7 @@ namespace inst::config {
             if (j.contains("httpUserAgent")) httpUserAgent = j["httpUserAgent"].get<std::string>();
             if (j.contains("remoteHideInstalled")) remoteHideInstalled = j["remoteHideInstalled"].get<bool>();
             if (j.contains("remoteHideInstalledSection")) remoteHideInstalledSection = j["remoteHideInstalledSection"].get<bool>();
+            if (j.contains("remoteHideIncompatibleCheats")) remoteHideIncompatibleCheats = j["remoteHideIncompatibleCheats"].get<bool>();
             if (j.contains("remoteAllBaseOnly")) remoteAllBaseOnly = j["remoteAllBaseOnly"].get<bool>();
             if (j.contains("remoteLegacyMode")) remoteLegacyMode = j["remoteLegacyMode"].get<bool>();
             if (j.contains("remoteStartGridMode")) remoteStartGridMode = j["remoteStartGridMode"].get<bool>();
@@ -856,6 +872,7 @@ namespace inst::config {
                 "httpUserAgent",
                 "remoteHideInstalled",
                 "remoteHideInstalledSection",
+                "remoteHideIncompatibleCheats",
                 "remoteAllBaseOnly",
                 "remoteLegacyMode",
                 "remoteStartGridMode",
@@ -905,4 +922,3 @@ namespace inst::config {
             setConfig();
     }
 }
-

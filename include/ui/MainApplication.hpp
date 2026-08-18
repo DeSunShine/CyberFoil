@@ -18,6 +18,7 @@ namespace inst::ui {
         public:
             using Application::Application;
             PU_SMART_CTOR(MainApplication)
+            void Close();
             void OnLoad() override;
             void RefreshInputDevice(bool force = false);
             pu::ui::Layout::Ref GetCurrentLayout() const { return this->lyt; }

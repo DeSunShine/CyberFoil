@@ -21,6 +21,7 @@ namespace inst::ui {
         public:
             remoteInstPage();
             ~remoteInstPage();
+            void stopIconDownloadWorker();
             PU_SMART_CTOR(remoteInstPage)
             void startRemote(bool forceRefresh = false);
             void startInstall();
@@ -72,6 +73,7 @@ namespace inst::ui {
             bool saveSyncLoaded = false;
             bool pendingMotdFetch = false;
             bool suppressBottomHints = false;
+            bool cheatInstallProgressVisible = false;
             std::string activeRemoteUrl;
             bool catalogCacheValid = false;
             bool catalogCacheUsedLegacyFallback = false;
@@ -220,6 +222,8 @@ namespace inst::ui {
             bool isAllSection() const;
             bool isInstalledSection() const;
             bool isSaveSyncSection() const;
+            bool isCheatsSection() const;
+            bool isCheatCompatible(const remoteInstStuff::RemoteItem& item) const;
             void ensureSaveSyncSectionLoaded();
             void showInstalledDetails();
             void buildSaveSyncSection(const std::string& remoteUrl);
@@ -229,6 +233,10 @@ namespace inst::ui {
             void refreshSaveVersionSelectorDetailText();
             bool handleSaveVersionSelectorInput(u64 Down, u64 Up, u64 Held, pu::ui::Touch Pos);
             void handleSaveSyncAction(int selectedIndex);
+            void handleCheatAction(int selectedIndex);
+            void installAllCheats();
+            void showCheatInstallProgress();
+            void manageLocalCheats(const remoteInstStuff::RemoteItem& item);
             void showCurrentDescriptionDialog();
             bool tryGetCurrentDescription(std::string& outTitle, std::string& outDescription) const;
             void openDescriptionOverlay();
