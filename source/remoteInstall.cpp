@@ -2060,7 +2060,7 @@ namespace remoteInstStuff {
             const std::string& user, const std::string& pass, std::vector<RemoteItem>& items,
             std::unordered_set<std::string>& seenItemUrls, std::unordered_set<std::string>& seenManifestUrls,
             std::string& error, const RemoteFetchProgressCallback& progressCb, const std::string& inheritedGoogleApiKey = "",
-            const std::string& credentialOrigin = "")
+            const std::string& credentialOrigin = "", const std::vector<std::string>& inheritedRequestHeaders = {})
         {
             if (!remote.is_object()) {
                 error = "Invalid Remote response.";
@@ -2077,8 +2077,12 @@ namespace remoteInstStuff {
             if (remote.contains("googleApiKey") && remote["googleApiKey"].is_string())
                 googleApiKey = TrimAscii(remote["googleApiKey"].get<std::string>());
 
-            std::vector<std::string> requestHeaders;
+            // Headers are a download policy, not manifest-request headers. A
+            // directory inherits its parent's policy unless it declares its
+            // own headers, which intentionally replace the inherited set.
+            std::vector<std::string> requestHeaders = inheritedRequestHeaders;
             if (remote.contains("headers")) {
+                requestHeaders.clear();
                 for (const auto& headerValue : remote["headers"]) {
                     const std::string header = TrimAscii(headerValue.get<std::string>());
                     const std::size_t colon = header.find(':');
@@ -2162,7 +2166,7 @@ namespace remoteInstStuff {
                     }
 
                     if (!CollectRemoteItemsFromJson(directoryJson, directoryUrl, user, pass, items, seenItemUrls, seenManifestUrls,
-                        error, progressCb, googleApiKey, credentialOrigin))
+                        error, progressCb, googleApiKey, credentialOrigin, requestHeaders))
                         return false;
                 }
             }
