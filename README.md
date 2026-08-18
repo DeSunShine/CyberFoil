@@ -1,4 +1,5 @@
 # CyberFoil
+[![Latest version](https://img.shields.io/github/v/release/luketanti/CyberFoil?label=version)](https://github.com/luketanti/CyberFoil/releases/latest)
 ![GitHub all releases downloads](https://img.shields.io/github/downloads/luketanti/CyberFoil/total)
 ![GitHub latest release downloads](https://img.shields.io/github/downloads/luketanti/CyberFoil/latest/total)
 [![Discord](https://img.shields.io/badge/Discord-Join%20Server-5865F2?logo=discord&logoColor=white)](https://discord.gg/gGy7hWxJeP)
