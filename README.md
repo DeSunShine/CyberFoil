@@ -15,6 +15,12 @@
 - Upload supports version notes.
 - Download/delete of remote save data backups supports per-version selection with an in-page selector layout.
 
+## Cheats (Currently only works with AeroFoil)
+- Browse cheats published by a compatible AeroFoil server in the dedicated `Cheats` section.
+- Download and install individual cheats, or install all available cheats at once.
+- Cheats are installed to `atmosphere/contents/<title-id>/cheats/<build-id>.txt`.
+- Manage local cheats: view, create, edit, and delete cheat files; upload edited cheats to AeroFoil when permitted.
+
 ## Offline Metadata/Icons
 - CyberFoil can use local title metadata and local icons from `sdmc:/switch/CyberFoil/offline_db/`.
 
