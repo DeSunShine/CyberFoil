@@ -1,0 +1,46 @@
+name: Build CyberFoil (background-backend)
+
+on:
+  push:
+    branches:
+      - background-backend
+  pull_request:
+    branches:
+      - background-backend
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    container:
+      image: devkitpro/devkita64:latest
+
+    steps:
+      - name: Checkout (with submodules)
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 0
+
+      - name: Install Switch dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          dkp-pacman -S --noconfirm --needed switch-ntfs-3g switch-lwext4
+
+      - name: Build CyberFoil NRO
+        shell: bash
+        run: |
+          set -euo pipefail
+          make -j"$(nproc)"
+          test -s ./cyberfoil.nro
+          ls -lh ./cyberfoil.nro
+
+      - name: Upload cyberfoil.nro
+        uses: actions/upload-artifact@v4
+        with:
+          name: cyberfoil-background-nro
+          path: ./cyberfoil.nro
+          if-no-files-found: error
