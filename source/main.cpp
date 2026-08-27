@@ -1,5 +1,6 @@
 #include <thread>
 #include "switch.h"
+#include "runtime/environment.hpp"
 #include "util/debug.h"
 #include "util/error.hpp"
 #include "ui/MainApplication.hpp"
@@ -8,8 +9,14 @@
 #include "util/offline_db_update.hpp"
 
 using namespace pu::ui::render;
+
 int main(int argc, char* argv[])
 {
+    // CyberFoil background work is emuMMC-only. Unknown environments fail closed.
+    if (!cyberfoil::runtime::IsEmuMMC()) {
+        return 0;
+    }
+
     bool appInitialized = false;
     try {
         debugLogReset();
@@ -30,19 +37,13 @@ int main(int argc, char* argv[])
         }
         main->Prepare();
         main->ShowWithFadeIn();
-        if (updateThread.joinable()) {
-            updateThread.join();
-        }
-        if (offlineDbUpdateCheckThread.joinable()) {
-            offlineDbUpdateCheckThread.join();
-        }
+        if (updateThread.joinable()) updateThread.join();
+        if (offlineDbUpdateCheckThread.joinable()) offlineDbUpdateCheckThread.join();
     } catch (std::exception& e) {
         LOG_DEBUG("An error occurred:\n%s", e.what());
     } catch (...) {
         LOG_DEBUG("An unknown error occurred during startup.");
     }
-    if (appInitialized) {
-        inst::util::deinitApp();
-    }
+    if (appInitialized) inst::util::deinitApp();
     return 0;
 }
