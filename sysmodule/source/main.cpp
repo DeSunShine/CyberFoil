@@ -1,5 +1,6 @@
 #include <switch.h>
 #include <cstdio>
+#include <sys/stat.h>
 
 namespace {
 
@@ -29,10 +30,6 @@ void writeMarker() {
     std::fclose(f);
 }
 
-void removeMarker() {
-    std::remove(kMarker);
-}
-
 } // namespace
 
 extern "C" {
@@ -41,8 +38,11 @@ u32 __nx_applet_type = AppletType_None;
 u32 __nx_fs_num_sessions = 1;
 
 void __appInit() {
-    R_ABORT_UNLESS(smInitialize());
-    R_ABORT_UNLESS(fsInitialize());
+    Result rc = smInitialize();
+    if (R_FAILED(rc)) diagAbortWithResult(rc);
+
+    rc = fsInitialize();
+    if (R_FAILED(rc)) diagAbortWithResult(rc);
 }
 
 void __appExit() {
@@ -69,7 +69,4 @@ int main(int, char**) {
     while (true) {
         svcSleepThread(1000000000ULL);
     }
-
-    removeMarker();
-    return 0;
 }
