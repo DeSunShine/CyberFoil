@@ -5,7 +5,7 @@
 namespace {
 
 constexpr char kStateDir[] = "sdmc:/config/cyberfoil";
-constexpr char kMarker[] = "sdmc:/config/cyberfoil/backend-running.flag";
+constexpr char kMarker[] = "sdmc:/config/cyberfoil/backend-started.flag";
 constexpr char kState[] = "sdmc:/config/cyberfoil/backend.state";
 
 bool isEmuMMC() {
@@ -18,23 +18,14 @@ bool isEmuMMC() {
     return R_SUCCEEDED(rc) && value != 0;
 }
 
-void writeMarker() {
-    FILE* f = std::fopen(kMarker, "wb");
-    if (!f) return;
+bool writeFile(const char* path, const char* data) {
+    FILE* f = std::fopen(path, "wb");
+    if (!f) return false;
 
-    const char marker[] = "CyberFoil backend running\n";
-    std::fwrite(marker, 1, sizeof(marker) - 1, f);
+    const size_t length = std::strlen(data);
+    const size_t written = std::fwrite(data, 1, length, f);
     std::fclose(f);
-
-    f = std::fopen(kState, "wb");
-    if (!f) return;
-
-    const char state[] =
-        "version=1\n"
-        "environment=emuMMC\n"
-        "phase=sysmodule-smoke-test\n";
-    std::fwrite(state, 1, sizeof(state) - 1, f);
-    std::fclose(f);
+    return written == length;
 }
 
 } // namespace
@@ -45,11 +36,10 @@ u32 __nx_applet_type = AppletType_None;
 u32 __nx_fs_num_sessions = 4;
 
 void __appInit() {
-    Result rc = smInitialize();
-    if (R_FAILED(rc)) diagAbortWithResult(rc);
-
-    rc = fsInitialize();
-    if (R_FAILED(rc)) diagAbortWithResult(rc);
+    // Keep initialization portable and fail-closed.  There is no UI or
+    // install logic in this milestone.
+    if (R_FAILED(smInitialize())) svcExitProcess(0);
+    if (R_FAILED(fsInitialize())) svcExitProcess(0);
 }
 
 void __appExit() {
@@ -61,18 +51,28 @@ void __appExit() {
 } // extern "C"
 
 int main(int, char**) {
-    // Fail closed: no CyberFoil backend activity outside emuMMC.
+    // CyberFoil background backend is intentionally emuMMC-only.
     if (!isEmuMMC()) {
         return 0;
     }
 
-    if (R_SUCCEEDED(fsdevMountSdmc())) {
-        (void)::mkdir("sdmc:/config", 0777);
-        (void)::mkdir(kStateDir, 0777);
-        writeMarker();
+    if (R_FAILED(fsdevMountSdmc())) {
+        return 0;
     }
 
-    // Smoke-test phase: remain alive independently of the CyberFoil GUI.
+    (void)::mkdir("sdmc:/config", 0777);
+    (void)::mkdir(kStateDir, 0777);
+
+    const bool markerOk = writeFile(kMarker, "CyberFoil backend started\nenvironment=emuMMC\n");
+    if (markerOk) {
+        (void)writeFile(kState,
+            "version=1\n"
+            "environment=emuMMC\n"
+            "phase=sysmodule-smoke-test\n"
+            "alive=1\n");
+    }
+
+    // Keep the process alive independently of CyberFoil NRO.
     while (true) {
         svcSleepThread(1000000000ULL);
     }
