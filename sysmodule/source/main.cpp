@@ -1,5 +1,6 @@
 #include <switch.h>
 #include <cstdio>
+#include <cstring>
 #include <sys/stat.h>
 
 namespace {
@@ -36,7 +37,7 @@ u32 __nx_applet_type = AppletType_None;
 u32 __nx_fs_num_sessions = 4;
 
 void __appInit() {
-    // Keep initialization portable and fail-closed.  There is no UI or
+    // Keep initialization portable and fail-closed. There is no UI or
     // install logic in this milestone.
     if (R_FAILED(smInitialize())) svcExitProcess(0);
     if (R_FAILED(fsInitialize())) svcExitProcess(0);
